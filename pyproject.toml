@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cansat-hw"
+version = "0.1.0"
+description = "Hardware drivers for CanSat mission (Pi Zero 2 W)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "spidev>=3.5",
+    "gpiozero>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+# Op de Pi: voorkomt gpiozero NativeFactory-waarschuwingen; `pip install -e ".[rpi]"`.
+rpi = ["RPi.GPIO>=0.7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
