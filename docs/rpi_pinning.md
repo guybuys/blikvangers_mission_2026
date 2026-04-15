@@ -102,7 +102,7 @@ Als **pin 18** beschikbaar is, is dit een logische set: **RESET** terug op **GPI
 | **MOSI** | **19** | **GPIO10** | SPI0 MOSI |
 | **MISO** | **21** | **GPIO9** | SPI0 MISO |
 | **RESET** | **22** | **GPIO25** | Vrij GPIO; hoog/laag volgens module |
-| **DIO0** | **18** | **GPIO24** | IRQ — edge-interrupt in code (vereist **pin 18** op carrier) |
+| **DIO0** | **18** | **GPIO24** | IRQ — in Python: ``RFM69(..., dio0_pin=24)`` of ``--dio0-pin 24`` (hybrid DIO0+SPI). **Zonder fysieke draad DIO0→deze GPIO:** laat ``--dio0-pin`` weg (alleen SPI-poll). |
 | **3V3 / GND** | **1** / **6** of **20** / **25** / **34** | — | 3V3-logica; GND dicht bij module |
 
 ### Alternatief zonder pin 18 (alleen huidige header)
@@ -250,6 +250,7 @@ Alleen nodig als je **tweede hardware-I2C** fysiek uitgebracht hebt.
 ### GPIO algemeen (reset, DIO0, servo-enable)
 
 - Geen aparte `dtparam` nodig voor “gewone” GPIO — wel lid van groep **`gpio`** (vaak al zo op Raspberry Pi OS).
+- **DIO0 + venv:** scripts zetten vaak `GPIOZERO_PIN_FACTORY=rpigpio`; dan kan `RPi.GPIO.add_event_detect` op DIO0 falen. De driver probeert eerst **lgpio** (gpiochip) voor DIO0. In een schone venv: `pip install lgpio` of `pip install -e ".[rpi]"` (zie `pyproject.toml`), of `python3 -m venv --system-site-packages .venv` als `python3-lgpio` systeem-breed geïnstalleerd is.
 - **pigpio:** na installatie **`pigpiod`** starten (zie servo-sectie); dat is los van I2C/SPI enable.
 
 ### Camera (CSI)

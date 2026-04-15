@@ -20,17 +20,47 @@ see project: https://github.com/mchobby/esp8266-upy/tree/master/rfm69
 #   Based on RF22 Copyright (C) 2011 Mike McCauley ported to mbed by Karl Zweimueller
 #   Based on RFM69 LowPowerLabs (https://github.com/LowPowerLab/RFM69/)
 #
-# Linux port: spidev (CE0 = NSS) + gpiozero reset — RadioHead-compatible framing unchanged.
+# Linux port: spidev (CE0 = NSS) + gpiozero reset; optioneel DIO0 voor IRQ-wacht
+# (geen busy-poll op SPI tijdens RX/TX-wachttijd).
 
 from __future__ import annotations
 
 import random
 import time
+import warnings
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import spidev
-from gpiozero import OutputDevice
+from gpiozero import DigitalInputDevice, OutputDevice
+
+
+def _open_dio0_input(pin: int) -> Optional[DigitalInputDevice]:
+	"""Open DIO0 for ``wait_for_active``. Prefer **lgpio** (gpiochip) so we avoid
+	``RPi.GPIO.add_event_detect``, which often fails in a venv with
+	``GPIOZERO_PIN_FACTORY=rpigpio`` while system Python (native/lgpio) works.
+	"""
+	last: Optional[BaseException] = None
+	try:
+		from gpiozero.pins.lgpio import LGPIOFactory
+
+		return DigitalInputDevice(pin, pin_factory=LGPIOFactory())
+	except (ImportError, ModuleNotFoundError):
+		pass
+	except Exception as e:  # noqa: BLE001 — probeer nog RPi.GPIO-factory
+		last = e
+	try:
+		return DigitalInputDevice(pin)
+	except RuntimeError as e:
+		msg = (
+			f"RFM69 DIO0 (GPIO{pin}): IRQ niet beschikbaar ({e!r}). "
+			"Val terug op SPI-pollen. In een venv: pip install lgpio "
+			"of python3 -m venv --system-site-packages .venv"
+		)
+		if last is not None:
+			msg += f" (lgpio-probe: {last!r})"
+		warnings.warn(msg, UserWarning, stacklevel=2)
+		return None
 
 
 __version__ = "0.0.1"
@@ -177,9 +207,16 @@ class RFM69:
 		spi_device: int = 0,
 		*,
 		reset_pin: int = 25,
+		dio0_pin: Optional[int] = None,
 		max_speed_hz: int = 1_000_000,
 	) -> None:
-		"""NSS must be wired to SPI CE0 (``/dev/spidev0.0``). Reset = BCM GPIO."""
+		"""NSS must be wired to SPI CE0 (``/dev/spidev0.0``). Reset = BCM GPIO.
+
+		``dio0_pin`` (BCM): optionele verbinding naar RFM69 **DIO0**. Als gezet,
+		wacht ``receive()`` / ``send()`` op DIO0-edges i.p.v. SPI te pollen op
+		IRQ-flags (zuiniger CPU). Zelfde mapping als RadioHead: RX = PayloadReady,
+		TX = PacketSent. Zie project-pinning (typisch GPIO **24**).
+		"""
 		dev_path = Path(f"/dev/spidev{spi_bus}.{spi_device}")
 		self._spi = spidev.SpiDev()
 		try:
@@ -199,6 +236,11 @@ class RFM69:
 		self._spi.mode = 0
 
 		self._reset = OutputDevice(reset_pin, initial_value=False)
+		self._dio0: Optional[DigitalInputDevice] = None
+		if dio0_pin is not None:
+			if dio0_pin == reset_pin:
+				raise ValueError("dio0_pin and reset_pin must be different BCM numbers")
+			self._dio0 = _open_dio0_input(dio0_pin)
 		self._mode = None
 		self._tx_power = None
 		self.high_power = True
@@ -313,9 +355,7 @@ class RFM69:
 		self.spi_write_fifo(payload)
 		# Turn on transmit mode to send out the packet.
 		self.__transmit()
-		# Wait for packet sent interrupt with explicit polling (not ideal but
-		# best that can be done right now without interrupts).
-		timed_out = check_timeout(self.__packet_sent, self.xmit_timeout)
+		timed_out = self._wait_until_ready(self.__packet_sent, self.xmit_timeout)
 		# Listen again if requested.
 		if keep_listening:
 			self.__listen()
@@ -373,13 +413,9 @@ class RFM69:
 		if timeout is None:
 			timeout = self.receive_timeout
 		if timeout is not None:
-			# Wait for the payload_ready signal.  This is not ideal and will
-			# surely miss or overflow the FIFO when packets aren't read fast
-			# enough, however it's the best that can be done from Python without
-			# interrupt supports.
 			# Make sure we are listening for packets.
 			self.__listen()
-			timed_out = check_timeout(self.__payload_ready, timeout)
+			timed_out = self._wait_until_ready(self.__payload_ready, timeout)
 		# Payload ready is set, a packet is in the FIFO.
 		packet = None
 		# save last RSSI reading
@@ -465,6 +501,34 @@ class RFM69:
 		# Enter RX mode (will clear FIFO!).
 		#self.operation_mode = RX_MODE
 		self.set_mode( RFM69_MODE_RX )
+
+	def _wait_until_ready(self, is_ready: Callable[[], bool], limit: float) -> bool:
+		"""Block until ``is_ready()`` is true or ``limit`` seconds elapsed.
+
+		Returns True if **timed out** (not ready in time). Uses DIO0 when
+		``dio0_pin`` was passed to ``__init__``, else polls IRQ flags over SPI.
+
+		Met DIO0: **hybrid** — korte ``wait_for_active``-slots afgewisseld met SPI-
+		check van ``IRQ_FLAGS2``. Alleen op DIO0 vertrouwen faalt snel (korte puls,
+		lgpio-flank, of GPIO zweeft zonder echte DIO0-draad); de chipvlag blijft de
+		bron van waarheid.
+		"""
+		if limit is not None and limit <= 0:
+			return not is_ready()
+		if self._dio0 is None:
+			return check_timeout(is_ready, limit)
+		if is_ready():
+			return False
+		deadline = time.monotonic() + limit
+		chunk = min(max(limit * 0.25, 0.02), 0.2)
+		while time.monotonic() < deadline:
+			if is_ready():
+				return False
+			remaining = deadline - time.monotonic()
+			if remaining <= 0:
+				break
+			self._dio0.wait_for_active(min(chunk, max(remaining, 0.0005)))
+		return not is_ready()
 
 	def __packet_sent(self):
 		""" Transmit status """
@@ -883,7 +947,12 @@ class RFM69:
 
 	def close(self) -> None:
 		try:
-			self._spi.close()
+			if self._dio0 is not None:
+				self._dio0.close()
+				self._dio0 = None
 		finally:
-			self._reset.close()
+			try:
+				self._spi.close()
+			finally:
+				self._reset.close()
 

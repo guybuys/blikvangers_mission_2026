@@ -15,8 +15,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
-# Op de Pi: voorkomt gpiozero NativeFactory-waarschuwingen; `pip install -e ".[rpi]"`.
-rpi = ["RPi.GPIO>=0.7"]
+# Op de Pi: RPi.GPIO voor reset; lgpio voor DIO0-wacht (add_event_detect faalt vaak in venv + rpigpio).
+rpi = ["RPi.GPIO>=0.7", "lgpio>=0.2"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

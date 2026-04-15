@@ -40,6 +40,14 @@ def main() -> int:
 	p.add_argument("--dest", type=int, default=100, help="Standaard bestemming (basis); replies gaan naar afzender")
 	p.add_argument("--key", type=str, default="CANSAT_2025-2026", help="16-byte UTF-8 AES")
 	p.add_argument("--reset-pin", type=int, default=25)
+	p.add_argument(
+		"--dio0-pin",
+		type=int,
+		default=None,
+		metavar="BCM",
+		help="BCM GPIO voor RFM69 DIO0 (IRQ: PayloadReady/PacketSent); bv. 24 per pinning-doc. "
+		"Weglaten = alleen SPI-pollen (hogere CPU-belasting)",
+	)
 	p.add_argument("--spi-bus", type=int, default=0)
 	p.add_argument("--spi-device", type=int, default=0)
 	p.add_argument("--tx-power", type=int, default=13)
@@ -70,7 +78,12 @@ def main() -> int:
 	from cansat_hw.radio import RFM69
 	from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
 
-	rfm = RFM69(spi_bus=args.spi_bus, spi_device=args.spi_device, reset_pin=args.reset_pin)
+	rfm = RFM69(
+		spi_bus=args.spi_bus,
+		spi_device=args.spi_device,
+		reset_pin=args.reset_pin,
+		dio0_pin=args.dio0_pin,
+	)
 	state = RadioRuntimeState()
 	try:
 		rfm.frequency_mhz = args.freq
@@ -83,6 +96,8 @@ def main() -> int:
 		banner_tail = "Ctrl+C stop — geen !-commando's hier; die zijn voor de Pico base station"
 		if args.reply_delay > 0:
 			banner_tail += f" — reply-delay {args.reply_delay}s"
+		if args.dio0_pin is not None:
+			banner_tail += f" — DIO0 IRQ GPIO{args.dio0_pin}"
 		print(
 			"CanSat (Zero 2 W) radio protocol — node",
 			args.node,

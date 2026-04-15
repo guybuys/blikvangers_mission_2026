@@ -56,6 +56,13 @@ def main() -> int:
 		help="16-byte AES key (exact length 16) or shorter string (UTF-8, must be 16 bytes)",
 	)
 	parser.add_argument("--reset-pin", type=int, default=25, help="BCM GPIO for RFM69 reset")
+	parser.add_argument(
+		"--dio0-pin",
+		type=int,
+		default=None,
+		metavar="BCM",
+		help="BCM GPIO for RFM69 DIO0 IRQ (see docs/rpi_pinning.md); omit to poll IRQ flags over SPI",
+	)
 	parser.add_argument("--spi-bus", type=int, default=0)
 	parser.add_argument("--spi-device", type=int, default=0)
 	parser.add_argument("--tx-power", type=int, default=13, help="dBm (HCW: up to 20)")
@@ -94,7 +101,12 @@ def main() -> int:
 
 	rfm = None
 	try:
-		rfm = RFM69(spi_bus=args.spi_bus, spi_device=args.spi_device, reset_pin=args.reset_pin)
+		rfm = RFM69(
+			spi_bus=args.spi_bus,
+			spi_device=args.spi_device,
+			reset_pin=args.reset_pin,
+			dio0_pin=args.dio0_pin,
+		)
 		rfm.frequency_mhz = args.freq
 		rfm.encryption_key = key
 		rfm.node = args.node
