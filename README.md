@@ -28,7 +28,19 @@ source .venv/bin/activate
 pip install -e .
 # Aanbevolen op de Zero (minder gpiozero-warnings):
 pip install -e ".[rpi]"
+# Gimbal / BNO055 over I²C + pigpio in dezelfde venv (gebruik altijd dezelfde Python als voor scripts):
+python -m pip install -e ".[gimbal]"
+python -c "import pigpio; print('pigpio ok')"
 ```
+
+**Opnieuw dezelfde venv gebruiken** (geen `python3 -m venv` meer — die maakt een lege omgeving zonder `pigpio` / `smbus2`):
+
+```bash
+source .venv/bin/activate
+cd cansat_mission_2026
+```
+
+Alleen als je de map **`.venv` verwijdert** of op een **nieuwe machine** begint: opnieuw `python3 -m venv .venv`, dan `source .venv/bin/activate` en **opnieuw** `pip install -e .` en de extras die je nodig hebt (`.[rpi]`, `.[gimbal]`, `.[sensors]`, …).
 
 Radio-test (NSS op **SPI CE0**, reset standaard **BCM 25** — zie documentatie):
 

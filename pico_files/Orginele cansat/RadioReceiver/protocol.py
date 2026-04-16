@@ -9,12 +9,16 @@ Conventies
 - Eén logische regel = één pakket (geen newline in de payload).
 - Antwoorden beginnen met ``OK `` of ``ERR `` (spatie na prefix) waar mogelijk.
 - Mode op de CanSat (wanneer geïmplementeerd):
-    ``GET MODE``  ->  ``OK MODE CONFIG`` of ``OK MODE LAUNCH``
-    ``SET MODE CONFIG`` / ``SET MODE LAUNCH``  ->  ``OK MODE ...`` of ``ERR ...``
+    ``GET MODE``  ->  ``OK MODE CONFIG`` of ``OK MODE MISSION``
+    ``SET MODE CONFIG`` / ``SET MODE MISSION``  ->  ``OK MODE ...`` of ``ERR ...``
+    (Oude alias: ``SET MODE LAUNCH`` wordt als ``MISSION`` behandeld; antwoord is ``OK MODE MISSION``.)
 - Radio (frequentie op de CanSat via RFM69; **alleen in RAM** tot reboot — geen config-bestand):
     ``GET FREQ``  ->  ``OK FREQ 433.0``
     ``SET FREQ 433.0``  ->  ``OK FREQ 433.0`` (zelfde LO voor TX en RX op die chip)
 - Alive-check: ``PING``  ->  ``OK PING``
+- Sensor (alleen CONFIG, als de Zero de sensor heeft geïnitialiseerd):
+    ``READ BME280`` of ``BME280``  ->  ``OK BME280 <hPa> <°C> <%RH>`` of ``ERR NO BME280`` / ``ERR BME280 …``
+    ``READ BNO055`` of ``BNO055``  ->  ``OK BNO055 <h> <r> <p> <cal>`` (euler ° + sys/gyro/accel/mag 0–3) of ``ERR NO BNO055``
 
 Lokale Pico-commando's (niet over de lucht) beginnen met ``!`` — zie basestation_cli.py
 """
@@ -41,7 +45,9 @@ def help_wire_commands() -> str:
 	return (
 		"Draad-commando's (naar CanSat, max %u bytes UTF-8):\n"
 		"  PING\n"
-		"  GET MODE / SET MODE CONFIG / SET MODE LAUNCH\n"
+		"  GET MODE / SET MODE CONFIG / SET MODE MISSION\n"
 		"  GET FREQ / SET FREQ <mhz>\n"
+		"  READ BME280 / BME280   (druk/temp/RH)\n"
+		"  READ BNO055 / BNO055   (euler + cal; fusion IMU)\n"
 		"  (vrije tekst wordt ook verstuurd — handig om te debuggen)\n"
 	) % MAX_PAYLOAD

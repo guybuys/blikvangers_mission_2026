@@ -60,7 +60,7 @@ Op de 40-pins header zijn er **precies twee** **3V3**-punten: **pin 1** en **pin
 
 ### Eén bus (standaard)
 
-Beide sensoren kunnen op **I2C1** (GPIO2/3): zelfde **SDA/SCL**, verschillende **adressen** (BME280 meestal `0x76` of `0x77`, BNO055 standaard `0x28` — controleer jumpers/ADR).
+Beide sensoren kunnen op **I2C1** (GPIO2/3): zelfde **SDA/SCL**, verschillende **adressen** (BME280 meestal `0x76` of `0x77`, BNO055 standaard **`0x28`** (ADR laag) of **`0x29`** — controleer jumpers). Verificatie: `i2cget -y 1 0x77 0xd0` → **`0x60`** (BME280); `i2cget -y 1 0x28 0x00` → **`0xa0`** (BNO055).
 
 | Signaal | Fysieke pin | BCM | Apparaat |
 |---------|-------------|-----|----------|
@@ -128,8 +128,10 @@ Twee servogevers en één **enable** die de **LiPo-/accu-spanning naar de servom
 |---------|-------------|-----|-----------|
 | **Servo 1 (PWM)** | **32** | **GPIO12** | Hardware **PWM0** — geschikt voor stabiele servo-aansturing (o.a. `pigpio`, of kernel PWM) |
 | **Servo 2 (PWM)** | **33** | **GPIO13** | Hardware **PWM1** |
-| **Servo-voeding enable** | **31** | **GPIO6** | Schakelt de **motorspanning** (LiPo via jullie schakeling), niet de Pi-5V. Digitaal uit: active-high/low volgens jullie MOSFET/driver |
+| **Servo-voeding enable** | **31** | **GPIO6** | Schakelt de **motorspanning** (LiPo via jullie schakeling), niet de Pi-5V. **Active-high**; **pull-down** op de gate zodat bij GPIO-input (na `pigpiod`/script-stop) de gate **laag** blijft → rail uit |
 | **GND servo's/driver** | **34** | — | Common ground voor servo-aansturing en motorvoedingspad; gebruik eventueel ook **20** voor retour van hoge servostroom volgens layout |
+
+**Software-mapping:** fysiek blijven **pin 32 = BCM12** en **pin 33 = BCM13** de PWM-lijnen; als de **motoraansluitingen** t.o.v. die lijnen zijn omgewisseld, zet in `config/gimbal/servo_calibration.json` bij `servo1`/`servo2` de **`gpio`**-velden op de BCM die effectief naar de juiste motor gaan (in de repo: logische **servo1 → 13**, **servo2 → 12**). `scripts/gimbal/gimbal_test.py --swap-gpio` of `scripts/gimbal_level.py --swap-gpio` doet hetzelfde tijdelijk zonder JSON te wijzigen.
 
 **Pin 15 (GPIO22)** blijft **vrij** als reserve (extra I/O; bit-bang I2C vergt sowieso twee vrije GPIO’s als je dat ooit nodig hebt).
 
@@ -139,8 +141,8 @@ Voor **servo’s** is **pigpio** een goede keuze op de Raspberry Pi: de **`pigpi
 
 - **Installatie (Pi OS):** `sudo apt update && sudo apt install -y pigpio python3-pigpio`
 - **Daemon:** `sudo systemctl enable --now pigpiod` (of handmatig `sudo pigpiod` tot je zeker weet dat alles werkt)
-- **Python:** verbind met `import pigpio; pi = pigpio.pi()` — daarna o.a. `pi.set_servo_pulsewidth(12, …)` en `pi.set_servo_pulsewidth(13, …)` (pulsewidth typisch **500–2500 µs** voor 1–2 ms servo’s; exact volgens datasheet van jullie motoren)
-- **Enable (pin 31 / GPIO6):** `pi.write(6, 0)` of `1` afhankelijk van jullie enable-circuit (active-high/low)
+- **Python:** verbind met `import pigpio; pi = pigpio.pi()` — daarna `pi.set_servo_pulsewidth(<BCM>, …)` met de BCM-nummers uit `config/gimbal/servo_calibration.json` (pulsewidth typisch **500–2500 µs** voor 1–2 ms servo’s; exact volgens datasheet van jullie motoren)
+- **Enable (pin 31 / GPIO6):** `pi.write(6, 1)` = voeding aan, `0` = uit (**active-high**). Hardware **pull-down** op de gate: na loslaten van de pin (input) blijft enable veilig uit.
 - **Let op:** zolang **pigpiod** draait, worden die GPIO’s door pigpio beheerd — **niet dezelfde pins tegelijk** met gpiozero/RPi.GPIO voor servo’s gebruiken. De **RFM69** zit op andere pins (SPI) en kan naast pigpio draaien zolang er geen pinconflict is.
 
 ---

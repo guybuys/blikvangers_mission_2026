@@ -1,0 +1,15 @@
+{
+  "servo1": {
+    "gpio": 13,
+    "min_us": 1050,
+    "center_us": 1400,
+    "max_us": 1750
+  },
+  "servo2": {
+    "gpio": 12,
+    "min_us": 1150,
+    "center_us": 1600,
+    "max_us": 1950
+  },
+  "saved_at": 1775260800
+}

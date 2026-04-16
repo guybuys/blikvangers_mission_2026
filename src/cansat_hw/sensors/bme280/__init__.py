@@ -1,1 +1,19 @@
-"""BME280 driver — to be implemented."""
+"""BME280 (I²C)."""
+
+from cansat_hw.sensors.bme280.device import (
+	BME280,
+	BME280_OSAMPLE_1,
+	BME280_OSAMPLE_16,
+	BME280_OSAMPLE_2,
+	BME280_OSAMPLE_4,
+	BME280_OSAMPLE_8,
+)
+
+__all__ = [
+	"BME280",
+	"BME280_OSAMPLE_1",
+	"BME280_OSAMPLE_2",
+	"BME280_OSAMPLE_4",
+	"BME280_OSAMPLE_8",
+	"BME280_OSAMPLE_16",
+]

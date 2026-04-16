@@ -61,8 +61,10 @@ Max. **60 bytes** UTF-8 per pakket, één regel zonder newline.
 Voorbeelden:
 
 - `PING` — alive-check; verwacht antwoord `OK PING`.
-- `GET MODE` / `SET MODE CONFIG` / `SET MODE LAUNCH`
+- `GET MODE` / `SET MODE CONFIG` / `SET MODE MISSION` (oude alias: `SET MODE LAUNCH` → zelfde modus, antwoord `OK MODE MISSION`)
 - `GET FREQ` / `SET FREQ 433.0`
+- `READ BME280` of kort `BME280` — `OK BME280 …` als BME280 actief op de Zero; anders `ERR NO BME280`
+- `READ BNO055` of kort `BNO055` — `OK BNO055 …` (heading/roll/pitch + calibratie 0–3); anders `ERR NO BNO055`
 
 Vrije tekst zonder prefix wordt ook verstuurd (handig om te debuggen).
 
@@ -76,9 +78,16 @@ Op de **Zero** (SSH, zelfde repo, venv actief):
 python scripts/cansat_radio_protocol.py
 python scripts/cansat_radio_protocol.py --verbose --poll 0.5
 python scripts/cansat_radio_protocol.py --verbose --poll 0.5 --reply-delay 0.08
+python scripts/cansat_radio_protocol.py --bme280-addr 0x77   # als de sensor op 0x77 zit
+python scripts/bme280_test.py --chip-id
+python scripts/bme280_test.py --samples 50 --interval 0 --os 1
+python scripts/bno055_test.py --chip-id
+python scripts/bno055_test.py --samples 20 --interval 0.1
 ```
 
 `--reply-delay` (seconden): pauze op de Zero **na** ontvangen/verwerken **vóór** de antwoord-TX — geeft de Pico na eigen TX tijd om stabiel in RX te gaan (half-duplex). **Standaard in het script: 0.08 s**; zet op `0` als je geen extra wachttijd wilt.
+
+**BME280:** op de Zero `pip install smbus2` of `pip install -e ".[sensors]"`. Zonder I²C of met `--no-bme280` reageert `READ BME280` met `ERR NO BME280`.
 
 Dat draait `cansat_hw.radio.wire_protocol` (zelfde tekstregels als hierboven). Standaard **node 120**, freq **433.0 MHz**, key `CANSAT_2025-2026` — gelijk houden met de Pico `!freq` / `!dest` / `!node`.
 

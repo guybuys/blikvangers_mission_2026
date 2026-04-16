@@ -12,13 +12,20 @@ Uitgebreidere notities en hardware-informatie. De **projectintro en installatie*
 - **[Pico base station CLI + draad-protocol](../../pico_files/Orginele%20cansat/RadioReceiver/README_basestation.md)**  
   Thonny, lokale `!`-commando’s, tekstregels naar de CanSat.
 - **CanSat (Zero 2 W):** `python scripts/cansat_radio_protocol.py` vanuit de repo-root (zie [project-README](../README.md)).
+- **BME280 / BNO055 (I²C):** `python scripts/bme280_test.py` / `python scripts/bno055_test.py` (`pip install smbus2` of `pip install -e ".[sensors]"`). Over de radio in CONFIG: `BME280` / `BNO055` (zie base station README).
+- **Gimbal (pigpio + calibratie-JSON):** [`scripts/gimbal/`](../scripts/gimbal/README.md) — calibratie in `config/gimbal/`; niveauregeling o.a. `scripts/gimbal_level.py` (BNO055 via smbus2).
+
+## Missie & vluchtstates (concept)
+
+- **[Missie-states — uitleg voor leerlingen](mission_states.md)**  
+  Twee lagen (Pico `CONFIG` / `MISSION` vs Zero-substates `PAD_IDLE`, `ASCENT`, `DEPLOYED`, `LANDED`), Nederlandse uitleg bij de Engelse namen, overgangen, frequentie persistentie, WiFi-kanttekening, link met `wire_protocol.py`.
 
 ## Later uit te breiden
 
 Hier kunnen o.a. komen:
 
-- Radioprotocol op de CanSat / Zero (config vs launch), parameterbestanden  
-- Sensor-integratie (BME280, BNO055)  
+- Radioprotocol op de CanSat / Zero (config vs mission), parameterbestanden — zie ook [mission_states.md](mission_states.md)  
+- Verdere sensor-integratie (BNO055)  
 - Camera (CSI) en gimbal-servo’s  
 - Stroomverbruik en testprocedures  
 

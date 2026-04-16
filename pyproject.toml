@@ -17,6 +17,10 @@ dependencies = [
 dev = ["pytest>=7.0"]
 # Op de Pi: RPi.GPIO voor reset; lgpio voor DIO0-wacht (add_event_detect faalt vaak in venv + rpigpio).
 rpi = ["RPi.GPIO>=0.7", "lgpio>=0.2"]
+# BME280 (I²C): smbus2 op de Zero; op Mac zonder I²C niet installeren.
+sensors = ["smbus2>=0.4.3"]
+# Gimbal-scripts (pigpio-Pythonclient + smbus2); op de Pi ook ``sudo apt install pigpio python3-pigpio`` / ``pigpiod``.
+gimbal = ["pigpio>=1.78", "smbus2>=0.4.3"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

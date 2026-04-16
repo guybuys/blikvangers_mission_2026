@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CanSat flight computer — Raspberry Pi Zero 2 W — radio commando-loop (CONFIG / LAUNCH).
+CanSat flight computer — Raspberry Pi Zero 2 W — radio commando-loop (CONFIG / MISSION).
 
 Luistert op RFM69 naar pakketten voor dit node-ID, beantwoordt met dezelfde
 tekstregels als de base station op de **Pico** (Thonny: `protocol.py` / README_basestation).
@@ -60,6 +60,29 @@ def main() -> int:
 		help="seconden wachten na verwerken vóór antwoord-TX (half-duplex marge voor de Pico; standaard 0.08, 0=uit)",
 	)
 	p.add_argument("--verbose", action="store_true")
+	p.add_argument("--i2c-bus", type=int, default=1, help="I²C-bus voor sensoren (meestal 1)")
+	p.add_argument(
+		"--bme280-addr",
+		type=lambda x: int(x, 0),
+		default=0x76,
+		help="BME280 I²C-adres (0x76 of 0x77)",
+	)
+	p.add_argument(
+		"--no-bme280",
+		action="store_true",
+		help="Geen BME280 initialiseren (geen READ BME280 over radio)",
+	)
+	p.add_argument(
+		"--bno055-addr",
+		type=lambda x: int(x, 0),
+		default=0x28,
+		help="BNO055 I²C-adres (0x28 of 0x29)",
+	)
+	p.add_argument(
+		"--no-bno055",
+		action="store_true",
+		help="Geen BNO055 initialiseren (geen READ BNO055 over radio)",
+	)
 	args = p.parse_args()
 	if args.reply_delay < 0:
 		print("--reply-delay must be >= 0", file=sys.stderr)
@@ -74,6 +97,55 @@ def main() -> int:
 	if not spi_dev.exists():
 		print("Missing", spi_dev, "— enable SPI", file=sys.stderr)
 		return 1
+
+	i2c_dev = Path(f"/dev/i2c-{args.i2c_bus}")
+	bme280 = None
+	if not args.no_bme280 and i2c_dev.exists():
+		try:
+			from cansat_hw.sensors.bme280 import BME280
+
+			bme280 = BME280(args.i2c_bus, args.bme280_addr)
+			if bme280.chip_id != 0x60:
+				print(
+					f"WARN: BME280 chip id 0x{bme280.chip_id:02X} (verwacht 0x60) — READ BME280 uit",
+					file=sys.stderr,
+				)
+				bme280.close()
+				bme280 = None
+		except Exception as e:  # noqa: BLE001
+			print("WARN: BME280 niet beschikbaar:", e, file=sys.stderr)
+			if bme280 is not None:
+				try:
+					bme280.close()
+				except Exception:
+					pass
+				bme280 = None
+	elif not args.no_bme280:
+		print("WARN: geen", i2c_dev, "— BME280 over radio uit", file=sys.stderr)
+
+	bno055 = None
+	if not args.no_bno055 and i2c_dev.exists():
+		try:
+			from cansat_hw.sensors.bno055 import BNO055
+
+			bno055 = BNO055(args.i2c_bus, args.bno055_addr)
+			if bno055.chip_id != 0xA0:
+				print(
+					f"WARN: BNO055 chip id 0x{bno055.chip_id:02X} (verwacht 0xA0) — READ BNO055 uit",
+					file=sys.stderr,
+				)
+				bno055.close()
+				bno055 = None
+		except Exception as e:  # noqa: BLE001
+			print("WARN: BNO055 niet beschikbaar:", e, file=sys.stderr)
+			if bno055 is not None:
+				try:
+					bno055.close()
+				except Exception:
+					pass
+				bno055 = None
+	elif not args.no_bno055:
+		print("WARN: geen", i2c_dev, "— BNO055 over radio uit", file=sys.stderr)
 
 	from cansat_hw.radio import RFM69
 	from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
@@ -98,6 +170,10 @@ def main() -> int:
 			banner_tail += f" — reply-delay {args.reply_delay}s"
 		if args.dio0_pin is not None:
 			banner_tail += f" — DIO0 IRQ GPIO{args.dio0_pin}"
+		if bme280 is not None:
+			banner_tail += " — BME280"
+		if bno055 is not None:
+			banner_tail += " — BNO055"
 		print(
 			"CanSat (Zero 2 W) radio protocol — node",
 			args.node,
@@ -123,7 +199,7 @@ def main() -> int:
 			else:
 				if args.verbose:
 					print("RX from", from_node, ":", line.strip())
-				reply = handle_wire_line(rfm, state, line)
+				reply = handle_wire_line(rfm, state, line, bme280=bme280, bno055=bno055)
 				if args.verbose:
 					print("TX to  ", from_node, ":", reply.decode("utf-8", errors="replace"))
 
@@ -141,6 +217,16 @@ def main() -> int:
 		return 0
 	finally:
 		rfm.close()
+		if bme280 is not None:
+			try:
+				bme280.close()
+			except Exception:
+				pass
+		if bno055 is not None:
+			try:
+				bno055.close()
+			except Exception:
+				pass
 
 	return 0
 
