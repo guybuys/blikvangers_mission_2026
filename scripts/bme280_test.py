@@ -27,7 +27,7 @@ if _SRC.is_dir() and str(_SRC) not in sys.path:
 def main() -> int:
 	p = argparse.ArgumentParser(description="BME280 I²C smoke / rate test")
 	p.add_argument("--bus", type=int, default=1, help="I²C-bus (meestal 1 = /dev/i2c-1)")
-	p.add_argument("--address", type=lambda x: int(x, 0), default=0x76, help="I²C-adres (0x76 of 0x77)")
+	p.add_argument("--address", type=lambda x: int(x, 0), default=0x77, help="I²C-adres (0x76 of 0x77)")
 	p.add_argument(
 		"--os",
 		type=int,

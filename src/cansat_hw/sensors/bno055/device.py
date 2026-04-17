@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import struct
 import time
-from typing import Any, Tuple
+from typing import Any, List, Optional, Tuple
 
 # --- Register-adressen (datasheet / Adafruit-layout, page 0) ---
 BNO055_CHIP_ID_ADDR = 0x00
@@ -69,6 +69,7 @@ class BNO055:
 		time.sleep(0.01)
 		self._set_mode(self._fusion_mode)
 		time.sleep(0.05)
+		self._last_good_temperature: Optional[int] = None
 
 	def close(self) -> None:
 		b = getattr(self, "_bus", None)
@@ -94,6 +95,11 @@ class BNO055:
 	def _read_block(self, reg: int, length: int) -> bytes:
 		return bytes(self._bus.read_i2c_block_data(self._address, reg, length))
 
+	def _ensure_page0(self) -> None:
+		"""Temperatuur en fusedata zitten op registerpagina 0; expliciet zetten voorkomt sporadische foute bytes."""
+		self._write_u8(BNO055_PAGE_ID_ADDR, 0)
+		time.sleep(0.001)
+
 	def _set_mode(self, mode: int) -> None:
 		self._write_u8(BNO055_OPR_MODE_ADDR, OPERATION_MODE_CONFIG)
 		time.sleep(0.02)
@@ -105,8 +111,31 @@ class BNO055:
 		return self._read_u8(BNO055_CHIP_ID_ADDR)
 
 	def temperature_c(self) -> int:
-		"""Temperatuur in °C (8-bit signed)."""
-		return struct.unpack("b", self._read_block(BNO055_TEMP_ADDR, 1))[0]
+		"""Temperatuur in °C (8-bit signed, **chip/die**, geen omgeving).
+
+		Sporadisch levert de BNO055 een ongeldige byte (typisch ``0x97`` → −105 °C).
+		We lezen **meerdere keren** kort na elkaar, houden waarden in een ruime band,
+		nemen de **mediaan** van de geldige samples, en vallen terug op de laatste
+		goede meting als een hele batch ruis is.
+		"""
+		t_lo, t_hi = -40, 125
+		self._ensure_page0()
+		good: List[int] = []
+		last_raw = 0
+		for _ in range(7):
+			raw = int(self._bus.read_byte_data(self._address, BNO055_TEMP_ADDR))
+			last_raw = struct.unpack("b", bytes((raw & 0xFF,)))[0]
+			if t_lo <= last_raw <= t_hi:
+				good.append(last_raw)
+			time.sleep(0.0007)
+		if good:
+			good.sort()
+			out = good[len(good) // 2]
+			self._last_good_temperature = out
+			return out
+		if self._last_good_temperature is not None:
+			return self._last_good_temperature
+		return last_raw
 
 	def calibration_status(self) -> Tuple[int, int, int, int]:
 		"""``(system, gyro, accel, mag)`` elk 0–3."""
