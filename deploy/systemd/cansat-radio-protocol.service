@@ -26,8 +26,15 @@ Group=root
 WorkingDirectory=/home/icw/cansat_mission_2026
 Environment=PYTHONUNBUFFERED=1
 Environment=GPIOZERO_PIN_FACTORY=rpigpio
+# Zorg dat de photo/log-map bestaat vóór de service start; anders faalt de
+# preflight-check ``LOG`` (de service draait als root, dus ``~/photos`` ≠
+# ``/home/icw/photos``) — we maken daarom de juiste user-map en chmod'en die.
+ExecStartPre=/bin/mkdir -p /home/icw/photos
+ExecStartPre=/bin/chown icw:icw /home/icw/photos
 # Pas --freq / --node / --dest / pins aan jullie hardware aan.
-ExecStart=/home/icw/cansat_mission_2026/.venv/bin/python scripts/cansat_radio_protocol.py --verbose --poll 1.0 --reply-delay 0.08
+# --freq is enkel fallback: zodra de Pico ``SET FREQ`` heeft gedaan, staat
+# ``config/radio_runtime.json`` op beide kanten in sync.
+ExecStart=/home/icw/cansat_mission_2026/.venv/bin/python scripts/cansat_radio_protocol.py --verbose --poll 1.0 --reply-delay 0.08 --photo-dir /home/icw/photos --bme280-addr 0x77
 Restart=on-failure
 RestartSec=5
 

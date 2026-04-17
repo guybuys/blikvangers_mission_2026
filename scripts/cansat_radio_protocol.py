@@ -22,10 +22,12 @@ Stop: **Ctrl+C**, of op afstand (half-duplex) het draad-commando ``STOP RADIO`` 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 os.environ.setdefault("GPIOZERO_PIN_FACTORY", "rpigpio")
 
@@ -33,6 +35,30 @@ _ROOT = Path(__file__).resolve().parents[1]
 _SRC = _ROOT / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
 	sys.path.insert(0, str(_SRC))
+
+_DEFAULT_RUNTIME_PATH = _ROOT / "config" / "radio_runtime.json"
+
+
+def _load_persisted_freq(path: Path) -> Optional[float]:
+	try:
+		data = json.loads(path.read_text(encoding="utf-8"))
+	except (OSError, ValueError):
+		return None
+	try:
+		return float(data.get("freq_mhz"))
+	except (TypeError, ValueError):
+		return None
+
+
+def _save_persisted_freq(path: Path, mhz: float) -> Optional[str]:
+	try:
+		path.parent.mkdir(parents=True, exist_ok=True)
+		tmp = path.with_suffix(path.suffix + ".tmp")
+		tmp.write_text(json.dumps({"freq_mhz": float(mhz)}) + "\n", encoding="utf-8")
+		tmp.replace(path)
+		return None
+	except OSError as e:
+		return str(e)[:80]
 
 
 def main() -> int:
@@ -84,6 +110,24 @@ def main() -> int:
 		"--no-bno055",
 		action="store_true",
 		help="Geen BNO055 initialiseren (geen READ BNO055 over radio)",
+	)
+	p.add_argument(
+		"--photo-dir",
+		type=str,
+		default=str(Path.home() / "photos"),
+		help="Foto-/log-map waarvan bestaan+schrijfbaarheid als MISSION-preflight wordt gecheckt",
+	)
+	p.add_argument(
+		"--gimbal-cfg",
+		type=str,
+		default=str(_ROOT / "config" / "gimbal" / "servo_calibration.json"),
+		help="Pad naar servo-calibratie JSON (MISSION-preflight)",
+	)
+	p.add_argument(
+		"--runtime-path",
+		type=str,
+		default=str(_DEFAULT_RUNTIME_PATH),
+		help="JSON-bestand waarin de laatst toegepaste frequentie wordt bewaard (sync met Pico)",
 	)
 	args = p.parse_args()
 	if args.reply_delay < 0:
@@ -159,6 +203,13 @@ def main() -> int:
 		dio0_pin=args.dio0_pin,
 	)
 	state = RadioRuntimeState()
+	runtime_path = Path(args.runtime_path).expanduser()
+	persisted_freq = _load_persisted_freq(runtime_path)
+	if persisted_freq is not None:
+		print(f"Geladen freq {persisted_freq} MHz uit {runtime_path}")
+		args.freq = persisted_freq
+		state.freq_set = True
+
 	try:
 		rfm.frequency_mhz = args.freq
 		rfm.encryption_key = key
@@ -203,7 +254,15 @@ def main() -> int:
 			else:
 				if args.verbose:
 					print("RX from", from_node, ":", line.strip())
-				reply = handle_wire_line(rfm, state, line, bme280=bme280, bno055=bno055)
+				reply = handle_wire_line(
+					rfm,
+					state,
+					line,
+					bme280=bme280,
+					bno055=bno055,
+					photo_dir=args.photo_dir,
+					gimbal_cfg=args.gimbal_cfg,
+				)
 				if args.verbose:
 					print("TX to  ", from_node, ":", reply.decode("utf-8", errors="replace"))
 
@@ -216,6 +275,21 @@ def main() -> int:
 				print("WARN: reply TX failed (radio timeout)", file=sys.stderr)
 			if args.verbose:
 				print("state.mode =", state.mode)
+
+			if state.pending_freq_mhz is not None and ok:
+				new_freq = float(state.pending_freq_mhz)
+				state.pending_freq_mhz = None
+				try:
+					rfm.frequency_mhz = new_freq
+					print(f"Nieuwe RF-freq toegepast: {new_freq} MHz")
+				except Exception as e:  # noqa: BLE001
+					print("WARN: nieuwe freq toepassen mislukte:", e, file=sys.stderr)
+				err = _save_persisted_freq(runtime_path, new_freq)
+				if err:
+					print("WARN: persist freq mislukte:", err, file=sys.stderr)
+				else:
+					print(f"Freq persistent in {runtime_path}")
+
 			if state.exit_after_reply:
 				print("STOP RADIO: exiting.")
 				break

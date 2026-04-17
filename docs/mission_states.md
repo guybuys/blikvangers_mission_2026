@@ -109,6 +109,29 @@ en **bij opstart** weer inlezen voordat je naar `MISSION` gaat. **Eén “bron v
 
 In `src/cansat_hw/radio/wire_protocol.py` staat `RadioRuntimeState` met **`CONFIG`** en **`MISSION`**. Draad-commando’s: `SET MODE MISSION` / `GET MODE` (antwoord `OK MODE MISSION`). Voor oude scripts en notities blijft **`SET MODE LAUNCH`** nog als **alias** werken; de CanSat antwoordt dan met **`OK MODE MISSION`** en zet intern dezelfde modus. In missiemodus weigert de Zero de meeste commando’s met **`ERR BUSY MISSION`**.
 
+### MISSION-preflight (sanity check vóór `PAD_IDLE`)
+
+`SET MODE MISSION` voert eerst een **preflight** uit. Alleen als alle checks slagen, zet de Zero de modus om en komt het systeem in `PAD_IDLE`. Anders krijgt het base station `ERR PRE …` met korte codes voor wat ontbreekt — de Zero **blijft in CONFIG**. Dezelfde check is los op te vragen met `PREFLIGHT`.
+
+| Code | Wat wordt gecheckt | Hoe herstellen |
+|------|---------------------|----------------|
+| `TIME` | Systeemklok gezet sinds boot (`SET TIME`), óf NTP-sync, óf klok > 2025-01-01 | `!time` / `!timeepoch $(date +%s)` vanaf de Pico |
+| `GND` | Grondreferentie-druk gezet (`ground_hpa`) | `!calground` (gemiddelde BME280) of `SET GROUND <hPa>` |
+| `BME` | BME280 reageert en levert plausibele druk (800–1100 hPa) | I²C-bedrading / `bme280_test.py` |
+| `IMU` | BNO055 aanwezig, calibratie **sys ≥ 1** | CanSat rustig laten liggen, kort bewegen |
+| `DSK` | ≥ 500 MB vrij op `/` | Oude fotos opruimen |
+| `LOG` | Fotomap bestaat en is schrijfbaar (service: `/home/icw/photos` — via `--photo-dir` + `ExecStartPre=mkdir -p`) | `mkdir -p /home/icw/photos` |
+| `FRQ` | `SET FREQ` is gegeven deze sessie of **geladen uit** `config/radio_runtime.json` | `SET FREQ <mhz>` via Pico (zet én persisteert aan beide kanten) |
+| `GIM` | `config/gimbal/servo_calibration.json` aanwezig | `scripts/gimbal/servo_calibration.py` |
+
+`PREFLIGHT`-OK-antwoord bevat ook de **trigger-defaults** (`ASC`, `DEP`, `LND`) zodat het team ze kan bevestigen. Eenheden:
+
+- **`ASC` = stijging in meters** (t.o.v. grondreferentie). Intern rekent de Zero dit via de ISA-formule om naar een drukdaling in hPa (≈ 8,3 m/hPa nabij zeeniveau). `GET TRIGGERS` toont het hPa-equivalent mee zodra `ground_hpa` bekend is, bv. `ASC=5.0m/0.60hPa`.
+- **`DEP` = seconden** (deploy-duur na detectie).
+- **`LND` = meters** (hoogte onder grond waar landing wordt aangenomen).
+
+Defaults overschrijven: `SET TRIGGER ASCENT 5` (m), `SET TRIGGER DEPLOY 3.0` (s), `SET TRIGGER LAND 10` (m).
+
 ---
 
 ## Samenvatting voor op het bord

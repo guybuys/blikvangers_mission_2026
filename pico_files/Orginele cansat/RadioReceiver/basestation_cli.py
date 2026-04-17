@@ -12,6 +12,7 @@ Vereist op de Pico (zelfde map als dit bestand):
 Zie README_basestation.md voor protocol en bedrading.
 """
 
+import json
 import time
 
 from machine import SPI, Pin
@@ -34,6 +35,35 @@ DEST_CANSAT = DEFAULT_CANSAT_NODE
 REPLY_TIMEOUT_S = 2.0
 # Korte pauze na eigen TX vóór RX — geeft de CanSat tijd om naar RX te gaan (half-duplex).
 REPLY_GAP_S = 0.05
+
+# Persistent bewaarde freq (sync met Zero). Bij boot inlezen; na geslaagde
+# ``SET FREQ``-roundtrip ook lokaal toepassen + opslaan.
+RUNTIME_PATH = "radio_freq.json"
+
+
+def _load_persisted_freq():
+	try:
+		with open(RUNTIME_PATH, "r") as fh:
+			data = json.load(fh)
+		return float(data.get("freq_mhz"))
+	except (OSError, ValueError, TypeError):
+		return None
+
+
+def _save_persisted_freq(mhz):
+	try:
+		with open(RUNTIME_PATH, "w") as fh:
+			fh.write(json.dumps({"freq_mhz": float(mhz)}))
+			fh.write("\n")
+		return None
+	except OSError as e:
+		return str(e)
+
+
+_persisted = _load_persisted_freq()
+if _persisted is not None:
+	FREQ = _persisted
+	print("Geladen freq", FREQ, "MHz uit", RUNTIME_PATH)
 
 spi = SPI(
 	0,
@@ -70,6 +100,10 @@ def _print_help_local():
 	print("  !info          huidige freq / node / dest / timeout / gap")
 	print("  !time          stuur SET TIME <epoch> naar CanSat (Pico-klok; sync via Thonny indien nodig)")
 	print("  !timeepoch N   zelfde, met Unix-tijd N vanaf de laptop (bv. van `date +%s`)")
+	print("  !gettime       stuur GET TIME naar CanSat; antwoord = OK TIME <epoch> <ISO local>")
+	print("  !preflight     stuur PREFLIGHT naar CanSat (check T=TIME, G=GND, BME, IMU, DSK, LOG, FRQ, GIM)")
+	print("  !calground     stuur CAL GROUND (gemiddelde druk als grondreferentie)")
+	print("  !triggers      stuur GET TRIGGERS (huidige ASC/DEP/LND drempels)")
 	print("  !listen        alleen ontvangen (ACK aan) tot Ctrl+C — Thonny: stop knop")
 	print()
 	print("Typ een regel zonder ! om die naar de CanSat te sturen (max %u bytes UTF-8)." % MAX_PAYLOAD)
@@ -124,6 +158,14 @@ def _handle_local(line: str) -> bool:
 			_send_and_wait_reply(wire)
 		else:
 			print("ERR: !timeepoch <unix> — op de laptop: date +%s")
+	elif cmd == "!gettime":
+		_send_and_wait_reply("GET TIME")
+	elif cmd == "!preflight":
+		_send_and_wait_reply("PREFLIGHT")
+	elif cmd == "!calground":
+		_send_and_wait_reply("CAL GROUND")
+	elif cmd == "!triggers":
+		_send_and_wait_reply("GET TRIGGERS")
 	elif cmd == "!listen":
 		print("Listen-only (ACK aan). Stop met Thonny Stop of hardware reset.")
 		while True:
@@ -138,6 +180,31 @@ def _handle_local(line: str) -> bool:
 	else:
 		print("Onbekend lokaal commando — typ !help")
 	return True
+
+
+def _post_process_reply(sent_line, reply_text):
+	"""Voert ná een geslaagde roundtrip eventuele lokale synchronisatie uit."""
+	sent_parts = sent_line.strip().split()
+	if len(sent_parts) < 3:
+		return
+	if sent_parts[0].upper() != "SET" or sent_parts[1].upper() != "FREQ":
+		return
+	rparts = reply_text.strip().split()
+	if len(rparts) < 3 or rparts[0].upper() != "OK" or rparts[1].upper() != "FREQ":
+		return
+	try:
+		new_mhz = float(rparts[2])
+	except ValueError:
+		return
+	try:
+		rfm.frequency_mhz = new_mhz
+	except Exception as e:
+		print("WARN: lokale freq zetten mislukte:", e)
+		return
+	err = _save_persisted_freq(new_mhz)
+	if err:
+		print("WARN: persist freq mislukte:", err)
+	print("Lokale Pico RF-freq gesynchroniseerd:", new_mhz, "MHz (persistent)")
 
 
 def _send_and_wait_reply(wire_line: str):
@@ -161,13 +228,17 @@ def _send_and_wait_reply(wire_line: str):
 		print("(geen antwoord binnen %.1f s)" % REPLY_TIMEOUT_S)
 		print("  Tip: start op de CanSat (Zero 2 W) eerst: python scripts/cansat_radio_protocol.py")
 		print("  Probeer: !timeout 5   en/of   !gap 0.1   — zelfde freq/key als CanSat (!info)")
-	else:
-		print("RX <-", pkt)
-		try:
-			print("    ASCII:", str(pkt, "utf-8"))
-		except Exception:
-			pass
-		print("    RSSI:", rfm.last_rssi)
+		return
+	print("RX <-", pkt)
+	reply_text = ""
+	try:
+		reply_text = str(pkt, "utf-8")
+		print("    ASCII:", reply_text)
+	except Exception:
+		pass
+	print("    RSSI:", rfm.last_rssi)
+	if reply_text:
+		_post_process_reply(wire_line, reply_text)
 
 
 def main():

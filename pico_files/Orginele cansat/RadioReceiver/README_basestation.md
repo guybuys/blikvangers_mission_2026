@@ -54,6 +54,10 @@ Op de **CanSat (Zero 2 W)** draait `cansat_radio_protocol.py` **zonder** toetsen
 | `!info` | Huidige instellingen |
 | `!time` | Stuurt `SET TIME <epoch>` naar de CanSat (MicroPython `time.time()` — voor juiste tijd: Pico-klok syncen vanaf Thonny/laptop, zie hieronder) |
 | `!timeepoch N` | Zelfde met vast **Unix-tijd** `N` (op de laptop: `date +%s`) — handig als de Pico geen juiste RTC heeft |
+| `!gettime` | Stuurt `GET TIME` naar de CanSat; de Zero antwoordt met `OK TIME <epoch> <ISO local>` (bv. `2026-04-17T23:55:36+02:00`) |
+| `!preflight` | Stuurt `PREFLIGHT` — toont missende categorieën of `OK PRE ALL …` met grond-/trigger-info |
+| `!calground` | Stuurt `CAL GROUND` — de Zero middelt BME280-druk en bewaart die als grondreferentie |
+| `!triggers` | Stuurt `GET TRIGGERS` — huidige drempels (ASCENT m [+ hPa-equiv], DEPLOY s, LAND m) |
 | `!listen` | Alleen RX-loop (tot Stop in Thonny) |
 
 ## Draad-protocol (naar CanSat over RFM69)
@@ -64,10 +68,19 @@ Voorbeelden:
 
 - `PING` — alive-check; verwacht antwoord `OK PING`.
 - `GET MODE` / `SET MODE CONFIG` / `SET MODE MISSION` (oude alias: `SET MODE LAUNCH` → zelfde modus, antwoord `OK MODE MISSION`)
-- `GET FREQ` / `SET FREQ 433.0`
+- `GET FREQ` / `SET FREQ 433.0` — **persistent op beide kanten**. De Zero antwoordt nog op de **oude** freq, schakelt dan door en schrijft `config/radio_runtime.json`. De Pico-CLI detecteert `OK FREQ …` en past zijn eigen `frequency_mhz` aan + slaat op in `radio_freq.json` op de flash. Bij volgende boot laden beide dus vanzelf de laatst gebruikte waarde → **één commando, beide in sync, ook na reboot**.
 - `READ BME280` of kort `BME280` — `OK BME280 …` als BME280 actief op de Zero; anders `ERR NO BME280`
 - `READ BNO055` of kort `BNO055` — `OK BNO055 …` (heading/roll/pitch + calibratie 0–3); anders `ERR NO BNO055`
 - `SET TIME <unix_epoch>` — alleen als de Zero in **CONFIG** staat; zet de **systeemklok** (`OK TIME` of `ERR TIME …`). Op de Zero meestal **root** nodig (bv. systemd-service `User=root`) of `timedatectl` met passende rechten.
+- `GET TIME` — vraagt de huidige **systeemklok** van de Zero op (CONFIG én MISSION toegestaan). Antwoord: `OK TIME <epoch> <ISO local>` bv. `OK TIME 1776462936.401 2026-04-17T23:55:36+02:00`.
+- **MISSION-preflight (alleen CONFIG):**
+  - `CAL GROUND` — BME280-gemiddelde (16 samples) als grondreferentie (`OK GROUND <hPa>`).
+  - `SET GROUND <hPa>` — grondreferentie handmatig.
+  - `GET GROUND` — huidige referentie of `OK GROUND NONE`.
+  - `SET TRIGGER ASCENT <m>` / `DEPLOY <s>` / `LAND <m>` — drempels zetten (ASCENT is **stijging in meters** t.o.v. grond; DEPLOY in seconden; LAND in meters onder grond).
+  - `GET TRIGGERS` — bv. `OK TRIG ASC=5.0m/0.60hPa DEP=2.0s LND=5.0m` (hPa-equivalent via ISA wordt toegevoegd zodra `ground_hpa` bekend is).
+  - `PREFLIGHT` — toont `ERR PRE TIME GND BME IMU DSK LOG FRQ GIM` (alleen wat ontbreekt) of `OK PRE ALL GND=… ASC=… DEP=… LND=…`.
+  - `SET MODE MISSION` voert deze check automatisch uit; zolang iets ontbreekt krijg je `ERR PRE …` en **blijft de Zero in CONFIG**.
 - `STOP RADIO` — beëindigt `cansat_radio_protocol.py` **na** het antwoord `OK STOP RADIO` (werkt in CONFIG en MISSION). Handig bij autostart via **systemd**; alternatief: `sudo systemctl stop …` of SSH/`kill`.
 
 Vrije tekst zonder prefix wordt ook verstuurd (handig om te debuggen).

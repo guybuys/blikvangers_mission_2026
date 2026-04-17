@@ -12,6 +12,7 @@ Uitgebreidere notities en hardware-informatie. De **projectintro en installatie*
 - **[Pico base station CLI + draad-protocol](../../pico_files/Orginele%20cansat/RadioReceiver/README_basestation.md)**  
   Thonny, lokale `!`-commando’s, tekstregels naar de CanSat.
 - **CanSat (Zero 2 W):** `python scripts/cansat_radio_protocol.py` vanuit de repo-root (zie [project-README](../README.md)).
+- **[Radio-service (systemd) — bedienings-spiekbriefje](cansat_radio_service.md)** — start/stop, log volgen, herstarten, `STOP RADIO` vs `systemctl`, valkuilen bij autostart op de Zero.
 - **BME280 / BNO055 (I²C):** `python scripts/bme280_test.py` / `python scripts/bno055_test.py` (`pip install smbus2` of `pip install -e ".[sensors]"`). Over de radio in CONFIG: `BME280` / `BNO055` (zie base station README).
 - **Gimbal (pigpio + calibratie-JSON):** [`scripts/gimbal/`](../scripts/gimbal/README.md) — calibratie in `config/gimbal/`; niveauregeling o.a. `scripts/gimbal_level.py` (BNO055 via smbus2).
 - **Camera (Picamera2 + AprilTag + logging):** [`scripts/camera/`](../scripts/camera/README.md) — `descent_telemetry.py`, `focus_preview.py`; demo-referentie in `zero_files/camera_project/`.
