@@ -1,0 +1,35 @@
+# CanSat — radio draad-protocol op de Zero 2 W (autostart, geen SSH nodig).
+#
+# Installatie (één keer op de Zero, paden aanpassen naar jullie user + clone):
+#   sudo cp deploy/systemd/cansat-radio-protocol.service /etc/systemd/system/
+#   sudo nano /etc/systemd/system/cansat-radio-protocol.service   # WorkingDirectory + ExecStart
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cansat-radio-protocol.service
+#
+# Vereisten:
+#   - SPI aan; venv met pip install -e . (en evt. .[rpi])
+#   - Timezone (bv. Brussel): sudo timedatectl set-timezone Europe/Brussels
+#   - SET TIME over de radio: dit service draait als **root** zodat de klok gezet kan worden
+#     (clock_settime). Zonder root: timedatectl + sudoers, of weiger SET TIME (ERR TIME).
+#
+# Stoppen: STOP RADIO vanaf de Pico, of: sudo systemctl stop cansat-radio-protocol.service
+
+[Unit]
+Description=CanSat RFM69 wire protocol (CONFIG/MISSION listener)
+After=network-pre.target local-fs.target
+Wants=network-pre.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/icw/cansat_mission_2026
+Environment=PYTHONUNBUFFERED=1
+Environment=GPIOZERO_PIN_FACTORY=rpigpio
+# Pas --freq / --node / --dest / pins aan jullie hardware aan.
+ExecStart=/home/icw/cansat_mission_2026/.venv/bin/python scripts/cansat_radio_protocol.py --verbose --poll 1.0 --reply-delay 0.08
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

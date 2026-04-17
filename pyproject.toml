@@ -21,6 +21,13 @@ rpi = ["RPi.GPIO>=0.7", "lgpio>=0.2"]
 sensors = ["smbus2>=0.4.3"]
 # Gimbal-scripts (pigpio-Pythonclient + smbus2); op de Pi ook ``sudo apt install pigpio python3-pigpio`` / ``pigpiod``.
 gimbal = ["pigpio>=1.78", "smbus2>=0.4.3"]
+# Camera-scripts (AprilTag + OpenCV). NumPy <2: apt ``python3-picamera2`` trekt ``simplejpeg`` in dat tegen NumPy 1.x is gebouwd — met NumPy 2 in de venv faalt ``import picamera2``.
+# Op de Pi: ``sudo apt install python3-picamera2`` + ``pip install pupil-apriltag`` (import ``apriltag``).
+camera = [
+	"numpy>=1.22,<2",
+	# OpenCV 4.12+ wheels eisen NumPy ≥2; met numpy<2 (nodig voor apt-picamera2/simplejpeg) pinnen we <4.12.
+	"opencv-python-headless>=4.8,<4.12",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -52,6 +52,8 @@ Op de **CanSat (Zero 2 W)** draait `cansat_radio_protocol.py` **zonder** toetsen
 | `!timeout 2.0` | Seconden wachten op antwoord na zenden |
 | `!gap 0.05` | Pauze na eigen TX vóór RX (half-duplex) |
 | `!info` | Huidige instellingen |
+| `!time` | Stuurt `SET TIME <epoch>` naar de CanSat (MicroPython `time.time()` — voor juiste tijd: Pico-klok syncen vanaf Thonny/laptop, zie hieronder) |
+| `!timeepoch N` | Zelfde met vast **Unix-tijd** `N` (op de laptop: `date +%s`) — handig als de Pico geen juiste RTC heeft |
 | `!listen` | Alleen RX-loop (tot Stop in Thonny) |
 
 ## Draad-protocol (naar CanSat over RFM69)
@@ -65,6 +67,8 @@ Voorbeelden:
 - `GET FREQ` / `SET FREQ 433.0`
 - `READ BME280` of kort `BME280` — `OK BME280 …` als BME280 actief op de Zero; anders `ERR NO BME280`
 - `READ BNO055` of kort `BNO055` — `OK BNO055 …` (heading/roll/pitch + calibratie 0–3); anders `ERR NO BNO055`
+- `SET TIME <unix_epoch>` — alleen als de Zero in **CONFIG** staat; zet de **systeemklok** (`OK TIME` of `ERR TIME …`). Op de Zero meestal **root** nodig (bv. systemd-service `User=root`) of `timedatectl` met passende rechten.
+- `STOP RADIO` — beëindigt `cansat_radio_protocol.py` **na** het antwoord `OK STOP RADIO` (werkt in CONFIG en MISSION). Handig bij autostart via **systemd**; alternatief: `sudo systemctl stop …` of SSH/`kill`.
 
 Vrije tekst zonder prefix wordt ook verstuurd (handig om te debuggen).
 
@@ -92,6 +96,10 @@ python scripts/bno055_test.py --samples 20 --interval 0.1
 Dat draait `cansat_hw.radio.wire_protocol` (zelfde tekstregels als hierboven). Standaard **node 120**, freq **433.0 MHz**, key `CANSAT_2025-2026` — gelijk houden met de Pico `!freq` / `!dest` / `!node`.
 
 Zonder `cansat_radio_protocol.py` op de **Zero** zie je op de Pico na een TX: *(geen antwoord binnen … s)*.
+
+### Autostart op de Zero (systemd)
+
+Zie in de repo **`deploy/systemd/cansat-radio-protocol.service`**: pas `WorkingDirectory` en `ExecStart` (pad naar venv-Python en eventuele `--freq` / `--node`) aan, kopieer naar `/etc/systemd/system/`, `daemon-reload`, `enable --now`. Zo hoeft niemand met SSH het script handmatig te starten. **Tijdzone** eenmalig instellen (bv. `timedatectl set-timezone Europe/Brussels`) als foto-/videonamen in lokale tijd moeten lopen.
 
 ## Radio-instellingen
 

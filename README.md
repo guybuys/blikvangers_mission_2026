@@ -59,7 +59,13 @@ source .venv/bin/activate
 python scripts/cansat_radio_protocol.py --verbose
 ```
 
-Zelfde tekstregels als in `pico_files/.../RadioReceiver/README_basestation.md`. Stop met **Ctrl+C**.
+Zelfde tekstregels als in `pico_files/.../RadioReceiver/README_basestation.md`. Stop met **Ctrl+C** of het draad-commando **`STOP RADIO`** (antwoord `OK STOP RADIO`; daarna stopt het proces).
+
+**Tijd over de radio (alleen CONFIG):** `SET TIME <unix_epoch>` zet de systeemklok op de Zero (Unix-seconden; meestal root of systemd `User=root`, zie unit hieronder). Op de Pico: `!time` (Pico-klok — sync via Thonny indien nodig) of `!timeepoch <unix>` met `date +%s` vanaf de laptop. Zet op de Zero eenmalig **`timedatectl set-timezone Europe/Brussels`** als je overal lokale tijd wilt (bestandsnamen foto/video).
+
+**Autostart (geen SSH om de listener te starten):** voorbeeld-unit [`deploy/systemd/cansat-radio-protocol.service`](deploy/systemd/cansat-radio-protocol.service) — `WorkingDirectory` en `ExecStart` naar jullie pad/user aanpassen, daarna `sudo systemctl enable --now cansat-radio-protocol`. Stoppen: **`STOP RADIO`** over RF, of `sudo systemctl stop cansat-radio-protocol`, of via SSH het proces killen.
+
+**Camera (afdaling / AprilTag):** [`scripts/camera/README.md`](scripts/camera/README.md) — o.a. `pip install -e ".[camera]"` of meerdere extras **in één haakje**: `pip install -e ".[sensors,camera]"` (niet twee keer `-e ".[…]"` achter elkaar — dan klaagt pip over “conflicting dependencies”). De extra pinnt **`numpy<2`** (Picamera2 + apt-`simplejpeg`); daarnaast: `python3-picamera2` (apt) + `pupil-apriltag` op de Zero.
 
 Files en folders kopiëren naar de raspberry pi zero 2 w
 

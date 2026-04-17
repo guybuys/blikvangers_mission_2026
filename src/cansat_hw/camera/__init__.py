@@ -1,1 +1,1 @@
-"""CSI camera capture — to be implemented (e.g. Picamera2)."""
+"""CSI camera — Picamera2-scripts staan onder ``scripts/camera/`` (zie README daar)."""

@@ -19,6 +19,10 @@ Conventies
 - Sensor (alleen CONFIG, als de Zero de sensor heeft geïnitialiseerd):
     ``READ BME280`` of ``BME280``  ->  ``OK BME280 <hPa> <°C> <%RH>`` of ``ERR NO BME280`` / ``ERR BME280 …``
     ``READ BNO055`` of ``BNO055``  ->  ``OK BNO055 <h> <r> <p> <cal>`` (euler ° + sys/gyro/accel/mag 0–3) of ``ERR NO BNO055``
+- Tijd (alleen CONFIG op de Zero; zet systeemklok — meestal **root** of systemd ``User=root``):
+    ``SET TIME <unix_epoch>``  ->  ``OK TIME`` of ``ERR TIME …`` / ``ERR BAD TIME`` / ``ERR BUSY MISSION``
+- Radio-loop op de Zero netjes beëindigen (CONFIG of MISSION):
+    ``STOP RADIO``  ->  ``OK STOP RADIO`` (Zero stopt na het antwoordpakket)
 
 Lokale Pico-commando's (niet over de lucht) beginnen met ``!`` — zie basestation_cli.py
 """
@@ -47,6 +51,8 @@ def help_wire_commands() -> str:
 		"  PING\n"
 		"  GET MODE / SET MODE CONFIG / SET MODE MISSION\n"
 		"  GET FREQ / SET FREQ <mhz>\n"
+		"  SET TIME <unix_epoch>   (alleen CONFIG; systeemklok op de Zero)\n"
+		"  STOP RADIO              (Zero stopt de commando-loop na OK-antwoord)\n"
 		"  READ BME280 / BME280   (druk/temp/RH)\n"
 		"  READ BNO055 / BNO055   (euler + cal; fusion IMU)\n"
 		"  (vrije tekst wordt ook verstuurd — handig om te debuggen)\n"

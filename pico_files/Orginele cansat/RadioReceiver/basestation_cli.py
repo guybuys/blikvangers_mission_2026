@@ -68,6 +68,8 @@ def _print_help_local():
 	print("  !timeout 2.0   seconden wachten op antwoord na zenden")
 	print("  !gap 0.05      seconden wachten na TX vóór RX (half-duplex marge)")
 	print("  !info          huidige freq / node / dest / timeout / gap")
+	print("  !time          stuur SET TIME <epoch> naar CanSat (Pico-klok; sync via Thonny indien nodig)")
+	print("  !timeepoch N   zelfde, met Unix-tijd N vanaf de laptop (bv. van `date +%s`)")
 	print("  !listen        alleen ontvangen (ACK aan) tot Ctrl+C — Thonny: stop knop")
 	print()
 	print("Typ een regel zonder ! om die naar de CanSat te sturen (max %u bytes UTF-8)." % MAX_PAYLOAD)
@@ -113,6 +115,15 @@ def _handle_local(line: str) -> bool:
 			"gap:",
 			REPLY_GAP_S,
 		)
+	elif cmd == "!time":
+		wire = "SET TIME %.3f" % time.time()
+		_send_and_wait_reply(wire)
+	elif cmd == "!timeepoch":
+		if len(parts) >= 2:
+			wire = "SET TIME %s" % parts[1].strip()
+			_send_and_wait_reply(wire)
+		else:
+			print("ERR: !timeepoch <unix> — op de laptop: date +%s")
 	elif cmd == "!listen":
 		print("Listen-only (ACK aan). Stop met Thonny Stop of hardware reset.")
 		while True:

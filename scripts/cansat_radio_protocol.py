@@ -14,7 +14,9 @@ Start op de CanSat (Zero 2 W), venv actief, SPI aan:
   python scripts/cansat_radio_protocol.py --poll 0.5 --verbose
   python scripts/cansat_radio_protocol.py --reply-delay 0      # geen extra pauze vóór antwoord
 
-Stop: Ctrl+C
+Stop: **Ctrl+C**, of op afstand (half-duplex) het draad-commando ``STOP RADIO`` (antwoord
+``OK STOP RADIO``; daarna stopt het proces — handig bij **systemd**-autostart). Met SSH:
+``sudo systemctl stop …`` of ``kill`` op het PID werkt ook.
 """
 
 from __future__ import annotations
@@ -165,7 +167,9 @@ def main() -> int:
 		rfm.tx_power = args.tx_power
 		rfm.receive_timeout = min(args.poll, 10.0)
 
-		banner_tail = "Ctrl+C stop — geen !-commando's hier; die zijn voor de Pico base station"
+		banner_tail = (
+			"Ctrl+C of STOP RADIO om te stoppen — geen !-commando's hier; die zijn voor de Pico base station"
+		)
 		if args.reply_delay > 0:
 			banner_tail += f" — reply-delay {args.reply_delay}s"
 		if args.dio0_pin is not None:
@@ -212,6 +216,9 @@ def main() -> int:
 				print("WARN: reply TX failed (radio timeout)", file=sys.stderr)
 			if args.verbose:
 				print("state.mode =", state.mode)
+			if state.exit_after_reply:
+				print("STOP RADIO: exiting.")
+				break
 	except KeyboardInterrupt:
 		print("\nStopped.")
 		return 0
