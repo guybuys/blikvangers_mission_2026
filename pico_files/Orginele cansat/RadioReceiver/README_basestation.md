@@ -57,7 +57,10 @@ Op de **CanSat (Zero 2 W)** draait `cansat_radio_protocol.py` **zonder** toetsen
 | `!gettime` | Stuurt `GET TIME` naar de CanSat; de Zero antwoordt met `OK TIME <epoch> <ISO local>` (bv. `2026-04-17T23:55:36+02:00`) |
 | `!preflight` | Stuurt `PREFLIGHT` — toont missende categorieën of `OK PRE ALL …` met grond-/trigger-info |
 | `!calground` | Stuurt `CAL GROUND` — de Zero middelt BME280-druk en bewaart die als grondreferentie |
-| `!triggers` | Stuurt `GET TRIGGERS` — huidige drempels (ASCENT m [+ hPa-equiv], DEPLOY s, LAND m) |
+| `!triggers` | Stuurt `GET TRIGGERS` — huidige drempels (ASCENT m [+ hPa-equiv], DEPLOY m-daling vanaf apogee, LAND m) |
+| `!alt` | Stuurt `GET ALT` — hoogte boven grondreferentie + actuele druk (werkt ook in MISSION) |
+| `!apogee` | Stuurt `GET APOGEE` — hoogste hoogte tot nu toe, bijhorende druk en ouderdom in s |
+| `!resetapogee` | Stuurt `RESET APOGEE` — apogee-tracking herbeginnen (alleen CONFIG) |
 | `!listen` | Alleen RX-loop (tot Stop in Thonny) |
 
 ## Draad-protocol (naar CanSat over RFM69)
@@ -77,8 +80,11 @@ Voorbeelden:
   - `CAL GROUND` — BME280-gemiddelde (16 samples) als grondreferentie (`OK GROUND <hPa>`).
   - `SET GROUND <hPa>` — grondreferentie handmatig.
   - `GET GROUND` — huidige referentie of `OK GROUND NONE`.
-  - `SET TRIGGER ASCENT <m>` / `DEPLOY <s>` / `LAND <m>` — drempels zetten (ASCENT is **stijging in meters** t.o.v. grond; DEPLOY in seconden; LAND in meters onder grond).
-  - `GET TRIGGERS` — bv. `OK TRIG ASC=5.0m/0.60hPa DEP=2.0s LND=5.0m` (hPa-equivalent via ISA wordt toegevoegd zodra `ground_hpa` bekend is).
+  - `SET TRIGGER ASCENT <m>` / `DEPLOY <m_daling>` / `LAND <m>` — drempels zetten. `ASCENT` = **stijging in meters** t.o.v. grond; `DEPLOY` = **daling in meters vanaf apogee** (fysisch: "zijn we het hoogste punt voorbij?"); `LAND` = meters boven grond voor landing.
+  - `GET TRIGGERS` — bv. `OK TRIG ASC=5.0m/0.60hPa DEP=3.0m LND=5.0m` (hPa-equivalent voor ASC wordt toegevoegd zodra `ground_hpa` bekend is).
+  - `GET ALT` / `ALT` — `OK ALT <m_boven_grond> <hPa>` (toegelaten in CONFIG én MISSION; werkt alleen als BME280 + grond gekend zijn).
+  - `GET APOGEE` — `OK APOGEE <m> <hPa> <age_s>` of `OK APOGEE NONE` (toegelaten in CONFIG én MISSION).
+  - `RESET APOGEE` — `OK APOGEE RESET` (alleen CONFIG).
   - `PREFLIGHT` — toont `ERR PRE TIME GND BME IMU DSK LOG FRQ GIM` (alleen wat ontbreekt) of `OK PRE ALL GND=… ASC=… DEP=… LND=…`.
   - `SET MODE MISSION` voert deze check automatisch uit; zolang iets ontbreekt krijg je `ERR PRE …` en **blijft de Zero in CONFIG**.
 - `STOP RADIO` — beëindigt `cansat_radio_protocol.py` **na** het antwoord `OK STOP RADIO` (werkt in CONFIG en MISSION). Handig bij autostart via **systemd**; alternatief: `sudo systemctl stop …` of SSH/`kill`.

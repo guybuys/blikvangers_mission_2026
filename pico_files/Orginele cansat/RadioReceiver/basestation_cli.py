@@ -104,6 +104,9 @@ def _print_help_local():
 	print("  !preflight     stuur PREFLIGHT naar CanSat (check T=TIME, G=GND, BME, IMU, DSK, LOG, FRQ, GIM)")
 	print("  !calground     stuur CAL GROUND (gemiddelde druk als grondreferentie)")
 	print("  !triggers      stuur GET TRIGGERS (huidige ASC/DEP/LND drempels)")
+	print("  !alt           stuur GET ALT (hoogte in m boven grond + actuele druk)")
+	print("  !apogee        stuur GET APOGEE (hoogste hoogte sinds laatste reset + leeftijd)")
+	print("  !resetapogee   stuur RESET APOGEE (apogee-tracking opnieuw beginnen)")
 	print("  !listen        alleen ontvangen (ACK aan) tot Ctrl+C — Thonny: stop knop")
 	print()
 	print("Typ een regel zonder ! om die naar de CanSat te sturen (max %u bytes UTF-8)." % MAX_PAYLOAD)
@@ -166,6 +169,12 @@ def _handle_local(line: str) -> bool:
 		_send_and_wait_reply("CAL GROUND")
 	elif cmd == "!triggers":
 		_send_and_wait_reply("GET TRIGGERS")
+	elif cmd == "!alt":
+		_send_and_wait_reply("GET ALT")
+	elif cmd == "!apogee":
+		_send_and_wait_reply("GET APOGEE")
+	elif cmd == "!resetapogee":
+		_send_and_wait_reply("RESET APOGEE")
 	elif cmd == "!listen":
 		print("Listen-only (ACK aan). Stop met Thonny Stop of hardware reset.")
 		while True:

@@ -48,7 +48,7 @@ BS> SET MODE MISSION  # pas toegelaten als preflight slaagt
 BS> STOP RADIO     # service stopt na OK STOP RADIO
 ```
 
-Zie [`docs/mission_states.md`](mission_states.md) voor de betekenis van de preflight-codes.
+Zie [`docs/mission_states.md`](mission_states.md) voor de betekenis van de preflight-codes, en [`docs/mission_triggers.md`](mission_triggers.md) voor uitleg en tuning van `ASCENT` / `DEPLOY` / `LAND`.
 
 ## Valkuilen
 

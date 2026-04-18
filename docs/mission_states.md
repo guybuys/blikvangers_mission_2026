@@ -124,13 +124,9 @@ In `src/cansat_hw/radio/wire_protocol.py` staat `RadioRuntimeState` met **`CONFI
 | `FRQ` | `SET FREQ` is gegeven deze sessie of **geladen uit** `config/radio_runtime.json` | `SET FREQ <mhz>` via Pico (zet én persisteert aan beide kanten) |
 | `GIM` | `config/gimbal/servo_calibration.json` aanwezig | `scripts/gimbal/servo_calibration.py` |
 
-`PREFLIGHT`-OK-antwoord bevat ook de **trigger-defaults** (`ASC`, `DEP`, `LND`) zodat het team ze kan bevestigen. Eenheden:
+`PREFLIGHT`-OK-antwoord bevat ook de **trigger-defaults** (`ASC`, `DEP`, `LND`) zodat het team ze kan bevestigen. Korte versie: `ASC` in **meters stijging**, `DEP` in **seconden**, `LND` in **meters** boven grond. `GET TRIGGERS` toont zodra grond gekend is ook het hPa-equivalent van `ASC`, bv. `ASC=5.0m/0.60hPa`.
 
-- **`ASC` = stijging in meters** (t.o.v. grondreferentie). Intern rekent de Zero dit via de ISA-formule om naar een drukdaling in hPa (≈ 8,3 m/hPa nabij zeeniveau). `GET TRIGGERS` toont het hPa-equivalent mee zodra `ground_hpa` bekend is, bv. `ASC=5.0m/0.60hPa`.
-- **`DEP` = seconden** (deploy-duur na detectie).
-- **`LND` = meters** (hoogte onder grond waar landing wordt aangenomen).
-
-Defaults overschrijven: `SET TRIGGER ASCENT 5` (m), `SET TRIGGER DEPLOY 3.0` (s), `SET TRIGGER LAND 10` (m).
+Volledige uitleg per trigger (gebeurtenis, sensor, tuning-tips, instelcommando's): **[Mission triggers](mission_triggers.md)**.
 
 ---
 

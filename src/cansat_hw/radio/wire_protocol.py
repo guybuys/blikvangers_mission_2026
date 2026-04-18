@@ -21,7 +21,7 @@ _TIME_SANE_MIN = 1_735_689_600  # 2025-01-01 UTC
 
 # Preflight-defaults (overschrijfbaar via SET TRIGGER / SET GROUND / SET FREQ).
 DEFAULT_ASCENT_HEIGHT_M = 5.0
-DEFAULT_DEPLOY_DT_S = 2.0
+DEFAULT_DEPLOY_DESCENT_M = 3.0
 DEFAULT_LAND_HZ_M = 5.0
 PREFLIGHT_MIN_FREE_MB = 500
 PREFLIGHT_BNO_SYS_MIN = 1
@@ -41,6 +41,21 @@ def height_m_to_dp_hpa(height_m: float, ground_hpa: float) -> float:
 	return float(ground_hpa) - p
 
 
+def pressure_to_altitude_m(pressure_hpa: float, ground_hpa: float) -> float:
+	"""Zet absolute druk (hPa) om naar hoogte in meters boven ``ground_hpa``.
+
+	Inverse van ``height_m_to_dp_hpa``: ``h = 44330 * (1 - (p/p0)^(1/5.255))``.
+	Negatief als de druk hoger is dan de grondreferentie (lager dan grond).
+	"""
+	gp = float(ground_hpa)
+	if gp <= 0:
+		return 0.0
+	ratio = float(pressure_hpa) / gp
+	if ratio <= 0:
+		return _ISA_H0_M
+	return _ISA_H0_M * (1.0 - (ratio ** (1.0 / _ISA_EXP)))
+
+
 @dataclass
 class RadioRuntimeState:
 	"""Houdt CONFIG vs MISSION bij (alleen in RAM; na reboot weer default)."""
@@ -52,8 +67,20 @@ class RadioRuntimeState:
 	pending_freq_mhz: Optional[float] = field(default=None, repr=False)
 	ground_hpa: Optional[float] = None
 	trig_ascent_height_m: float = DEFAULT_ASCENT_HEIGHT_M
-	trig_deploy_dt_s: float = DEFAULT_DEPLOY_DT_S
+	trig_deploy_descent_m: float = DEFAULT_DEPLOY_DESCENT_M
 	trig_land_hz_m: float = DEFAULT_LAND_HZ_M
+	# Apogee-tracking (hoogste hoogte sinds laatste RESET APOGEE).
+	max_alt_m: Optional[float] = None
+	min_pressure_hpa: Optional[float] = None
+	max_alt_ts: Optional[float] = None
+
+
+def _update_apogee(state: RadioRuntimeState, altitude_m: float, pressure_hpa: float) -> None:
+	"""Werk ``state.max_alt_m`` bij als de nieuwe hoogte hoger is."""
+	if state.max_alt_m is None or altitude_m > state.max_alt_m:
+		state.max_alt_m = float(altitude_m)
+		state.min_pressure_hpa = float(pressure_hpa)
+		state.max_alt_ts = time_mod.time()
 
 
 def _truncate(msg: bytes) -> bytes:
@@ -113,6 +140,9 @@ _MISSION_ALWAYS_CMDS = frozenset(
 		"PING",
 		"GET MODE",
 		"GET TIME",
+		"GET ALT",
+		"ALT",
+		"GET APOGEE",
 		"SET MODE CONFIG",
 		"STOP RADIO",
 	}
@@ -217,7 +247,7 @@ def preflight_checks(
 			missing.append("GIM")
 
 	info.append("ASC=%.1fm" % state.trig_ascent_height_m)
-	info.append("DEP=%.1fs" % state.trig_deploy_dt_s)
+	info.append("DEP=%.1fm" % state.trig_deploy_descent_m)
 	info.append("LND=%.1fm" % state.trig_land_hz_m)
 
 	return missing, info
@@ -369,10 +399,10 @@ def handle_wire_line(
 			state.trig_ascent_height_m = v
 			unit = "m"
 		elif which == "DEPLOY":
-			if not (0.1 <= v <= 120.0):
+			if not (0.5 <= v <= 100.0):
 				return b"ERR BAD TRIGGER"
-			state.trig_deploy_dt_s = v
-			unit = "s"
+			state.trig_deploy_descent_m = v
+			unit = "m"
 		elif which in ("LAND", "LANDED"):
 			if not (0.5 <= v <= 500.0):
 				return b"ERR BAD TRIGGER"
@@ -388,12 +418,44 @@ def handle_wire_line(
 			asc_str = "ASC=%.1fm/%.2fhPa" % (state.trig_ascent_height_m, dp)
 		else:
 			asc_str = "ASC=%.1fm" % state.trig_ascent_height_m
-		msg = "OK TRIG %s DEP=%.1fs LND=%.1fm" % (
+		msg = "OK TRIG %s DEP=%.1fm LND=%.1fm" % (
 			asc_str,
-			state.trig_deploy_dt_s,
+			state.trig_deploy_descent_m,
 			state.trig_land_hz_m,
 		)
 		return _truncate(msg.encode("utf-8"))
+
+	if su in ("GET ALT", "ALT"):
+		if bme280 is None:
+			return b"ERR NO BME280"
+		if state.ground_hpa is None:
+			return b"ERR NO GROUND"
+		try:
+			_, p_hpa, _ = bme280.read()
+		except Exception as e:  # noqa: BLE001
+			return _truncate(("ERR BME280 %s" % e).encode("utf-8", errors="replace"))
+		alt = pressure_to_altitude_m(float(p_hpa), float(state.ground_hpa))
+		_update_apogee(state, alt, float(p_hpa))
+		return _truncate(("OK ALT %.2f %.2f" % (alt, float(p_hpa))).encode("utf-8"))
+
+	if su == "GET APOGEE":
+		if state.max_alt_m is None:
+			return b"OK APOGEE NONE"
+		age = 0.0
+		if state.max_alt_ts is not None:
+			age = max(0.0, time_mod.time() - float(state.max_alt_ts))
+		return _truncate(
+			(
+				"OK APOGEE %.2f %.2f %.1f"
+				% (float(state.max_alt_m), float(state.min_pressure_hpa or 0.0), age)
+			).encode("utf-8")
+		)
+
+	if su == "RESET APOGEE":
+		state.max_alt_m = None
+		state.min_pressure_hpa = None
+		state.max_alt_ts = None
+		return b"OK APOGEE RESET"
 
 	if su == "PREFLIGHT":
 		missing, info = preflight_checks(
@@ -413,6 +475,14 @@ def handle_wire_line(
 			text = bme280.read_wire_reply()
 		except Exception as e:  # noqa: BLE001 — I²C / driver
 			return _truncate(("ERR BME280 %s" % e).encode("utf-8", errors="replace")[:MAX_PAYLOAD])
+		# Houd apogee ook bij via expliciete BME280-reads, zolang grond bekend is.
+		if state.ground_hpa is not None:
+			try:
+				_, p_hpa, _ = bme280.read()
+				alt = pressure_to_altitude_m(float(p_hpa), float(state.ground_hpa))
+				_update_apogee(state, alt, float(p_hpa))
+			except Exception:  # noqa: BLE001
+				pass
 		return _truncate(text.encode("utf-8", errors="replace"))
 
 	if su in ("READ BNO055", "BNO055"):

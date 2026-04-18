@@ -196,6 +196,19 @@ class GroundAndTriggersTest(unittest.TestCase):
 		self.assertIn(b"DEP=", out2)
 		self.assertIn(b"LND=", out2)
 
+	def test_set_trigger_deploy_is_in_meters(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "SET TRIGGER DEPLOY 4")
+		self.assertTrue(out.startswith(b"OK TRIG DEPLOY "))
+		self.assertIn(b"m", out)
+		self.assertAlmostEqual(st.trig_deploy_descent_m, 4.0, places=2)
+
+		out2 = handle_wire_line(rfm, st, "GET TRIGGERS")
+		self.assertIn(b"DEP=4.0m", out2)
+
 	def test_get_triggers_adds_hpa_when_ground_known(self) -> None:
 		from cansat_hw.radio.wire_protocol import handle_wire_line
 
@@ -215,6 +228,8 @@ class GroundAndTriggersTest(unittest.TestCase):
 		self.assertEqual(out, b"ERR BAD TRIGGER")
 		out2 = handle_wire_line(rfm, st, "SET TRIGGER ASCENT 0.01")
 		self.assertEqual(out2, b"ERR BAD TRIGGER")
+		out3 = handle_wire_line(rfm, st, "SET TRIGGER DEPLOY 999")
+		self.assertEqual(out3, b"ERR BAD TRIGGER")
 
 	def test_height_to_dp_hpa_conversion(self) -> None:
 		from cansat_hw.radio.wire_protocol import height_m_to_dp_hpa
@@ -222,6 +237,96 @@ class GroundAndTriggersTest(unittest.TestCase):
 		# Vuistregel rond zeeniveau: ~8.3 m per hPa.
 		self.assertAlmostEqual(height_m_to_dp_hpa(10.0, 1013.25), 1.20, places=1)
 		self.assertAlmostEqual(height_m_to_dp_hpa(5.0, 1013.25), 0.60, places=1)
+
+	def test_pressure_to_altitude_is_inverse(self) -> None:
+		from cansat_hw.radio.wire_protocol import height_m_to_dp_hpa, pressure_to_altitude_m
+
+		gp = 1019.1
+		for h in (0.0, 5.0, 10.0, 100.0, 500.0):
+			p = gp - height_m_to_dp_hpa(h, gp)
+			self.assertAlmostEqual(pressure_to_altitude_m(p, gp), h, places=2)
+
+
+class AltitudeAndApogeeTest(unittest.TestCase):
+	def test_get_alt_requires_bme(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		st.ground_hpa = 1013.25
+		out = handle_wire_line(rfm, st, "GET ALT")
+		self.assertEqual(out, b"ERR NO BME280")
+
+	def test_get_alt_requires_ground(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "GET ALT", bme280=_fake_bme())
+		self.assertEqual(out, b"ERR NO GROUND")
+
+	def test_get_alt_returns_altitude_and_updates_apogee(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		st.ground_hpa = 1013.25
+		# Huidige druk 1012.65 hPa ≈ ~5 m stijging.
+		out = handle_wire_line(rfm, st, "GET ALT", bme280=_fake_bme(p_hpa=1012.65))
+		self.assertTrue(out.startswith(b"OK ALT "))
+		parts = out.decode("utf-8").split()
+		self.assertEqual(len(parts), 4)
+		alt = float(parts[2])
+		self.assertAlmostEqual(alt, 5.0, delta=0.3)
+		self.assertIsNotNone(st.max_alt_m)
+		self.assertAlmostEqual(float(st.max_alt_m or 0.0), alt, delta=0.01)
+
+	def test_apogee_keeps_maximum(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		st.ground_hpa = 1013.25
+		handle_wire_line(rfm, st, "GET ALT", bme280=_fake_bme(p_hpa=1011.0))
+		peak = st.max_alt_m
+		handle_wire_line(rfm, st, "GET ALT", bme280=_fake_bme(p_hpa=1012.5))
+		self.assertEqual(st.max_alt_m, peak)
+		handle_wire_line(rfm, st, "GET ALT", bme280=_fake_bme(p_hpa=1008.0))
+		self.assertGreater(float(st.max_alt_m or 0.0), float(peak or 0.0))
+
+	def test_get_apogee_none_and_reset(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		self.assertEqual(handle_wire_line(rfm, st, "GET APOGEE"), b"OK APOGEE NONE")
+
+		st.ground_hpa = 1013.25
+		handle_wire_line(rfm, st, "GET ALT", bme280=_fake_bme(p_hpa=1011.0))
+		out = handle_wire_line(rfm, st, "GET APOGEE")
+		self.assertTrue(out.startswith(b"OK APOGEE "))
+		self.assertNotIn(b"NONE", out)
+
+		self.assertEqual(handle_wire_line(rfm, st, "RESET APOGEE"), b"OK APOGEE RESET")
+		self.assertIsNone(st.max_alt_m)
+		self.assertEqual(handle_wire_line(rfm, st, "GET APOGEE"), b"OK APOGEE NONE")
+
+	def test_get_alt_allowed_in_mission(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="MISSION")
+		st.ground_hpa = 1013.25
+		out = handle_wire_line(rfm, st, "GET ALT", bme280=_fake_bme(p_hpa=1011.0))
+		self.assertTrue(out.startswith(b"OK ALT "))
+
+	def test_reset_apogee_blocked_in_mission(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="MISSION")
+		out = handle_wire_line(rfm, st, "RESET APOGEE")
+		self.assertEqual(out, b"ERR BUSY MISSION")
 
 
 class PreflightTest(unittest.TestCase):

@@ -31,8 +31,11 @@ Conventies
     ``CAL GROUND``  ->  ``OK GROUND <hPa>`` (BME280-gemiddelde) of ``ERR NO BME280`` / ``ERR GROUND …``
     ``SET GROUND <hPa>``  ->  ``OK GROUND <hPa>`` (handmatig zetten)
     ``GET GROUND``  ->  ``OK GROUND <hPa>`` of ``OK GROUND NONE``
-    ``SET TRIGGER ASCENT <m>`` (stijging) / ``DEPLOY <s>`` / ``LAND <m>``  ->  ``OK TRIG <naam> <value><eenheid>``
-    ``GET TRIGGERS``  ->  ``OK TRIG ASC=<m>[/<hPa>] DEP=<s>s LND=<m>m`` (hPa-equivalent alleen als grond gekend)
+    ``SET TRIGGER ASCENT <m>`` (stijging) / ``DEPLOY <m>`` (daling vanaf apogee) / ``LAND <m>``  ->  ``OK TRIG <naam> <value><eenheid>``
+    ``GET TRIGGERS``  ->  ``OK TRIG ASC=<m>[/<hPa>] DEP=<m>m LND=<m>m`` (hPa-equivalent voor ASC zodra grond gekend)
+    ``GET ALT`` / ``ALT``  ->  ``OK ALT <m_boven_grond> <hPa>`` (vereist BME280 + grondreferentie); werkt ook in MISSION
+    ``GET APOGEE``  ->  ``OK APOGEE <m> <hPa> <age_s>`` of ``OK APOGEE NONE``; werkt ook in MISSION
+    ``RESET APOGEE``  ->  ``OK APOGEE RESET`` (alleen CONFIG)
     ``PREFLIGHT``  ->  ``OK PRE ALL GND=… ASC=… DEP=… LND=…`` of ``ERR PRE TIME GND BME IMU DSK LOG FRQ GIM``
     ``SET MODE MISSION`` antwoordt ``ERR PRE …`` zolang niet alles klaar is.
 
@@ -68,8 +71,11 @@ def help_wire_commands() -> str:
 		"  CAL GROUND              (BME280-gemiddelde als grondreferentie)\n"
 		"  SET GROUND <hPa>        (grondreferentie handmatig)\n"
 		"  GET GROUND              (huidige grondreferentie)\n"
-		"  SET TRIGGER ASCENT <m> / DEPLOY <s> / LAND <m>\n"
-		"  GET TRIGGERS            (ASC in m + hPa-equiv, DEP in s, LND in m)\n"
+		"  SET TRIGGER ASCENT <m> / DEPLOY <m_daling> / LAND <m>\n"
+		"  GET TRIGGERS            (ASC in m + hPa-equiv, DEP in m, LND in m)\n"
+		"  GET ALT / ALT           (hoogte + druk, ook in MISSION)\n"
+		"  GET APOGEE              (piek-hoogte sinds RESET APOGEE)\n"
+		"  RESET APOGEE            (apogee-teller herbeginnen, CONFIG)\n"
 		"  PREFLIGHT               (MISSION-gate check; SET MODE MISSION gebruikt 'm automatisch)\n"
 		"  STOP RADIO              (Zero stopt de commando-loop na OK-antwoord)\n"
 		"  READ BME280 / BME280   (druk/temp/RH)\n"
