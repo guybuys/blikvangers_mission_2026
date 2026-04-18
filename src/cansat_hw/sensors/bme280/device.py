@@ -100,6 +100,27 @@ class BME280:
 	def chip_id(self) -> int:
 		return int(self._bus.read_i2c_block_data(self._address, BME280_REGISTER_CHIPID, 1)[0])
 
+	@property
+	def iir_filter(self) -> int:
+		"""Actueel ingestelde IIR-coëfficient (0/2/4/8/16)."""
+		return self._iir_filter
+
+	def set_iir_filter(self, iir_filter: int) -> int:
+		"""Wijzig de IIR-coëfficient live. Retourneert de nieuwe waarde.
+
+		Het chip-filter behoudt zijn interne state; alleen het gewicht van nieuwe
+		samples verandert. Er wordt dus geen warm-up uitgevoerd (dat zou seconden
+		kosten). Responsiviteit herstelt vanzelf in een paar samples.
+		"""
+		if iir_filter not in _IIR_FILTER_CODES:
+			raise ValueError("iir_filter must be one of 0, 2, 4, 8, 16")
+		filter_code = _IIR_FILTER_CODES[iir_filter]
+		self._bus.write_byte_data(
+			self._address, BME280_REGISTER_CONFIG, (filter_code & 0x07) << 2
+		)
+		self._iir_filter = iir_filter
+		return iir_filter
+
 	def _load_calibration(self) -> None:
 		bus = self._bus
 		addr = self._address

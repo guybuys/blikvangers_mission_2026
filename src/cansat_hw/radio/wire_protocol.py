@@ -25,7 +25,35 @@ DEFAULT_DEPLOY_DESCENT_M = 3.0
 DEFAULT_LAND_HZ_M = 5.0
 PREFLIGHT_MIN_FREE_MB = 500
 PREFLIGHT_BNO_SYS_MIN = 1
-GROUND_CAL_SAMPLES = 16
+# CAL GROUND: eerst ``state.alt_prime_samples`` warm-up reads om het IIR-filter
+# in te halen op de echte huidige druk, dán ``GROUND_CAL_SAMPLES`` extra reads
+# middelen voor een ruisarme grondreferentie. Het oude gedrag (8 samples zonder
+# warmup) gaf systematisch een te lage grondreferentie wanneer het filter lang
+# stilgelegen had — zie comment in ``_ground_calibrate``.
+GROUND_CAL_SAMPLES = 4
+
+# IIR-coëfficienten die de BME280 accepteert (zie driver `_IIR_FILTER_CODES`).
+_IIR_ALLOWED = (0, 2, 4, 8, 16)
+# Standaard IIR per mode. In CONFIG willen we responsief blijven (snelle
+# hoogte-updates via GET ALT); in TEST/MISSION willen we stillere signalen.
+# De main loop mag deze overschrijven via ``state.config_iir`` / ``mission_iir``.
+DEFAULT_CONFIG_IIR = 4
+DEFAULT_MISSION_IIR = 16
+
+# GET ALT prime: aantal back-to-back BME280-reads dat we per GET ALT doen.
+# De LAATSTE read wordt teruggemeld; de eerdere zijn enkel "voer" voor het IIR-
+# filter zodat één losse GET ALT in CONFIG meteen accuraat is, ook als er lang
+# geen sample meer was. 1 = oud gedrag (geen priming).
+DEFAULT_ALT_PRIME = 5
+ALT_PRIME_MIN = 1
+ALT_PRIME_MAX = 32
+
+# TEST-mode: bootst een stuk MISSION/DEPLOYED na voor een korte timer zodat we
+# de deployed-logica kunnen bouwen zonder echte triggers (stijging/apogee/land).
+TEST_MODE_DEFAULT_S = 10.0
+TEST_MODE_MIN_S = 2.0
+TEST_MODE_MAX_S = 60.0
+TEST_MODE_TLM_INTERVAL_S = 1.0
 
 # ISA barometer-constante (h_m ≈ 44330 * (1 - (p/p0)^0.1903)).
 _ISA_H0_M = 44330.0
@@ -58,9 +86,9 @@ def pressure_to_altitude_m(pressure_hpa: float, ground_hpa: float) -> float:
 
 @dataclass
 class RadioRuntimeState:
-	"""Houdt CONFIG vs MISSION bij (alleen in RAM; na reboot weer default)."""
+	"""Houdt CONFIG vs MISSION vs TEST bij (alleen in RAM; na reboot weer default)."""
 
-	mode: str = "CONFIG"  # "CONFIG" | "MISSION"
+	mode: str = "CONFIG"  # "CONFIG" | "MISSION" | "TEST"
 	exit_after_reply: bool = field(default=False, repr=False)
 	time_synced: bool = field(default=False, repr=False)
 	freq_set: bool = field(default=False, repr=False)
@@ -73,6 +101,19 @@ class RadioRuntimeState:
 	max_alt_m: Optional[float] = None
 	min_pressure_hpa: Optional[float] = None
 	max_alt_ts: Optional[float] = None
+	# TEST-mode bookkeeping (alles monotonic seconden; None buiten TEST).
+	test_duration_s: Optional[float] = field(default=None, repr=False)
+	test_start_monotonic: Optional[float] = field(default=None, repr=False)
+	test_deadline_monotonic: Optional[float] = field(default=None, repr=False)
+	test_next_tlm_monotonic: Optional[float] = field(default=None, repr=False)
+	# Bestemmingsnode voor unsolicited TLM/EVT (wordt door de main loop gezet).
+	test_dest_node: Optional[int] = field(default=None, repr=False)
+	# IIR-presets per mode. Worden bij mode-wissels automatisch naar de BME280
+	# geschreven (responsief in CONFIG, rustig in TEST/MISSION).
+	config_iir: int = DEFAULT_CONFIG_IIR
+	mission_iir: int = DEFAULT_MISSION_IIR
+	# Aantal samples per GET ALT (priming-burst voor het IIR-filter).
+	alt_prime_samples: int = DEFAULT_ALT_PRIME
 
 
 def _update_apogee(state: RadioRuntimeState, altitude_m: float, pressure_hpa: float) -> None:
@@ -143,10 +184,50 @@ _MISSION_ALWAYS_CMDS = frozenset(
 		"GET ALT",
 		"ALT",
 		"GET APOGEE",
+		"GET IIR",
+		"GET ALT PRIME",
 		"SET MODE CONFIG",
 		"STOP RADIO",
 	}
 )
+
+# In TEST-mode is er bewust **geen** abort: de timer op de Zero is heilig tot
+# hij afloopt, anders is het geen echte dry-run van DEPLOYED. Alleen de minst
+# invasieve observatie-commando's mogen erdoor.
+_TEST_ALWAYS_CMDS = frozenset(
+	{
+		"PING",
+		"GET MODE",
+		"GET TIME",
+		"GET IIR",
+	}
+)
+
+
+def _desired_iir_for_mode(state: RadioRuntimeState) -> int:
+	"""Welke IIR-coëfficient hoort bij de huidige mode?"""
+	if state.mode in ("TEST", "MISSION"):
+		return int(state.mission_iir)
+	return int(state.config_iir)
+
+
+def apply_mode_iir(state: RadioRuntimeState, bme280: Any) -> Optional[int]:
+	"""Zet BME280-IIR naar de preset die bij ``state.mode`` hoort.
+
+	Veilig om altijd te callen; doet niets als ``bme280`` of de driver geen
+	``set_iir_filter`` ondersteunt, en slikt I²C-fouten zodat mode-wissels niet
+	sneuvelen op een flaky bus. Retourneert de nieuwe waarde (of None bij fail).
+	"""
+	if bme280 is None:
+		return None
+	setter = getattr(bme280, "set_iir_filter", None)
+	if setter is None:
+		return None
+	target = _desired_iir_for_mode(state)
+	try:
+		return int(setter(target))
+	except Exception:  # noqa: BLE001
+		return None
 
 
 def _format_time_reply(now: float) -> bytes:
@@ -253,6 +334,143 @@ def preflight_checks(
 	return missing, info
 
 
+def preflight_checks_minimal(
+	state: RadioRuntimeState,
+	bme280: Any,
+) -> List[str]:
+	"""Snelle preflight voor **TEST-mode** — alleen TIME, GND, BME.
+
+	Geen IMU/DSK/LOG/FRQ/GIM: we willen snel kunnen testen zonder alle
+	missie-ceremonie. Zie ``preflight_checks`` voor de volledige MISSION-variant.
+	"""
+	missing: List[str] = []
+	if not _check_time_set(state):
+		missing.append("TIME")
+	if state.ground_hpa is None:
+		missing.append("GND")
+	if bme280 is None:
+		missing.append("BME")
+	else:
+		try:
+			_, p_hpa, _ = bme280.read()
+			if not (800.0 <= float(p_hpa) <= 1100.0):
+				missing.append("BME")
+		except Exception:  # noqa: BLE001
+			missing.append("BME")
+	return missing
+
+
+def _fmt_or_na(value: Optional[float], fmt: str) -> str:
+	if value is None:
+		return "NA"
+	try:
+		return fmt % float(value)
+	except (TypeError, ValueError):
+		return "NA"
+
+
+def build_telemetry_packet(
+	state: RadioRuntimeState,
+	bme280: Any,
+	bno055: Any,
+	*,
+	now_monotonic: Optional[float] = None,
+) -> bytes:
+	"""Bouw één TLM-pakket voor TEST/DEPLOYED (≤ MAX_PAYLOAD bytes).
+
+	Formaat: ``TLM <dt_ms> <alt_m> <p_hpa> <T_c> <heading> <roll> <pitch> <sys_cal>``.
+	Ontbrekende sensoren leveren ``NA`` tokens in plaats van floats.
+	"""
+	if now_monotonic is None:
+		now_monotonic = time_mod.monotonic()
+	start = state.test_start_monotonic if state.test_start_monotonic is not None else now_monotonic
+	dt_ms = int(max(0.0, now_monotonic - start) * 1000.0)
+
+	alt_m: Optional[float] = None
+	p_hpa: Optional[float] = None
+	t_c: Optional[float] = None
+	if bme280 is not None:
+		try:
+			t_read, p_read, _ = bme280.read()
+			p_hpa = float(p_read)
+			t_c = float(t_read)
+			if state.ground_hpa is not None:
+				alt_m = pressure_to_altitude_m(p_hpa, float(state.ground_hpa))
+				_update_apogee(state, alt_m, p_hpa)
+		except Exception:  # noqa: BLE001
+			alt_m = p_hpa = t_c = None
+
+	heading: Optional[float] = None
+	roll: Optional[float] = None
+	pitch: Optional[float] = None
+	sys_cal: Optional[int] = None
+	if bno055 is not None:
+		try:
+			heading, roll, pitch = bno055.read_euler()
+		except Exception:  # noqa: BLE001
+			heading = roll = pitch = None
+		try:
+			sys_cal = int(bno055.calibration_status()[0])
+		except Exception:  # noqa: BLE001
+			sys_cal = None
+
+	msg = "TLM %d %s %s %s %s %s %s %s" % (
+		dt_ms,
+		_fmt_or_na(alt_m, "%.2f"),
+		_fmt_or_na(p_hpa, "%.2f"),
+		_fmt_or_na(t_c, "%.1f"),
+		_fmt_or_na(heading, "%.1f"),
+		_fmt_or_na(roll, "%.1f"),
+		_fmt_or_na(pitch, "%.1f"),
+		"NA" if sys_cal is None else str(sys_cal),
+	)
+	return _truncate(msg.encode("utf-8", errors="replace"))
+
+
+def test_mode_tick(
+	state: RadioRuntimeState,
+	*,
+	now_monotonic: Optional[float] = None,
+) -> Tuple[bool, bool]:
+	"""Bepaal of de Zero nu telemetrie moet zenden of TEST moet afsluiten.
+
+	Retourneert ``(send_telemetry, end_test)``. De **caller** doet de TX en
+	roept daarna ``test_mode_end(state)`` aan als ``end_test`` True is.
+	Geen sensor-I/O hier zodat dit deterministisch te testen blijft.
+	"""
+	if state.mode != "TEST":
+		return False, False
+	if now_monotonic is None:
+		now_monotonic = time_mod.monotonic()
+	if state.test_deadline_monotonic is not None and now_monotonic >= state.test_deadline_monotonic:
+		return False, True
+	if state.test_next_tlm_monotonic is not None and now_monotonic >= state.test_next_tlm_monotonic:
+		return True, False
+	return False, False
+
+
+def test_mode_advance_tlm(
+	state: RadioRuntimeState,
+	*,
+	now_monotonic: Optional[float] = None,
+	interval_s: float = TEST_MODE_TLM_INTERVAL_S,
+) -> None:
+	"""Schuif de volgende TLM-deadline op na een geslaagde TX."""
+	if now_monotonic is None:
+		now_monotonic = time_mod.monotonic()
+	state.test_next_tlm_monotonic = now_monotonic + float(interval_s)
+
+
+def test_mode_end(state: RadioRuntimeState) -> None:
+	"""Zet de state netjes terug naar CONFIG ná een TEST-timer-afloop."""
+	state.mode = "CONFIG"
+	state.test_duration_s = None
+	state.test_start_monotonic = None
+	state.test_deadline_monotonic = None
+	state.test_next_tlm_monotonic = None
+	state.test_dest_node = None
+
+
 def _format_preflight_reply(missing: List[str], info: List[str]) -> bytes:
 	if missing:
 		msg = "ERR PRE " + " ".join(missing)
@@ -261,10 +479,21 @@ def _format_preflight_reply(missing: List[str], info: List[str]) -> bytes:
 	return _truncate(msg.encode("utf-8", errors="replace"))
 
 
-def _ground_calibrate(bme280: Any) -> Tuple[bool, float, str]:
-	"""Gemiddelde van ``GROUND_CAL_SAMPLES`` metingen; ``(ok, hpa, err)``."""
+def _ground_calibrate(bme280: Any, *, prime_samples: int = 0) -> Tuple[bool, float, str]:
+	"""Warm-up + gemiddelde voor de grondreferentie; ``(ok, hpa, err)``.
+
+	De BME280 staat in forced mode: het IIR-filter advanceert alléén tijdens
+	een effectieve ``read()``. Als er lang geen reads zijn geweest, "loopt het
+	filter achter" op de echte druk. We doen daarom eerst ``prime_samples``
+	weggegooide reads om het filter bij te benen, en pas daarna middelen we
+	``GROUND_CAL_SAMPLES`` reads tot één grondreferentie. Zo komt
+	``CAL GROUND`` direct overeen met wat een opvolgende ``GET ALT`` ziet.
+	"""
+	prime = max(0, int(prime_samples))
 	samples: List[float] = []
 	try:
+		for _ in range(prime):
+			bme280.read()
 		for _ in range(GROUND_CAL_SAMPLES):
 			_, p_hpa, _ = bme280.read()
 			samples.append(float(p_hpa))
@@ -303,14 +532,23 @@ def handle_wire_line(
 		if su not in _MISSION_ALWAYS_CMDS:
 			return _truncate(b"ERR BUSY MISSION")
 
+	if state.mode == "TEST":
+		if su not in _TEST_ALWAYS_CMDS:
+			return _truncate(b"ERR BUSY TEST")
+
 	if su == "PING":
 		return b"OK PING"
 
 	if su == "GET MODE":
+		if state.mode == "TEST" and state.test_duration_s is not None:
+			return _truncate(
+				("OK MODE TEST %g" % float(state.test_duration_s)).encode("utf-8")
+			)
 		return _truncate(("OK MODE %s" % state.mode).encode("utf-8"))
 
 	if su == "SET MODE CONFIG":
 		state.mode = "CONFIG"
+		apply_mode_iir(state, bme280)
 		return b"OK MODE CONFIG"
 
 	if su in ("SET MODE MISSION", "SET MODE LAUNCH"):
@@ -326,7 +564,44 @@ def handle_wire_line(
 		if missing:
 			return _truncate(("ERR PRE " + " ".join(missing)).encode("utf-8"))
 		state.mode = "MISSION"
+		apply_mode_iir(state, bme280)
 		return b"OK MODE MISSION"
+
+	if (
+		len(tokens) >= 3
+		and tokens[0].upper() == "SET"
+		and tokens[1].upper() == "MODE"
+		and tokens[2].upper() == "TEST"
+	):
+		# Alleen vanuit CONFIG starten (geen test-in-test, geen mid-mission switch).
+		if state.mode != "CONFIG":
+			return _truncate(b"ERR BUSY")
+		# Optionele duur; default, clamp naar veilige grenzen.
+		duration: float = TEST_MODE_DEFAULT_S
+		if len(tokens) >= 4:
+			try:
+				duration = float(tokens[3])
+			except ValueError:
+				return b"ERR BAD TEST"
+		if duration < TEST_MODE_MIN_S:
+			duration = TEST_MODE_MIN_S
+		elif duration > TEST_MODE_MAX_S:
+			duration = TEST_MODE_MAX_S
+		missing = preflight_checks_minimal(state, bme280)
+		if missing:
+			return _truncate(("ERR PRE " + " ".join(missing)).encode("utf-8"))
+		now = time_mod.monotonic()
+		state.mode = "TEST"
+		state.test_duration_s = duration
+		state.test_start_monotonic = now
+		state.test_deadline_monotonic = now + duration
+		# Eerste telemetrie-pakket kort na de reply (0.5 s marge voor de half-
+		# duplex switch; daarna elk ``TEST_MODE_TLM_INTERVAL_S`` interval).
+		state.test_next_tlm_monotonic = now + 0.5
+		# ``test_dest_node`` wordt door de main loop gezet op ``from_node`` na
+		# het zenden van dit antwoord.
+		apply_mode_iir(state, bme280)
+		return _truncate(("OK MODE TEST %g" % duration).encode("utf-8"))
 
 	if su == "STOP RADIO":
 		state.exit_after_reply = True
@@ -366,7 +641,7 @@ def handle_wire_line(
 	if su == "CAL GROUND":
 		if bme280 is None:
 			return b"ERR NO BME280"
-		ok, avg, err = _ground_calibrate(bme280)
+		ok, avg, err = _ground_calibrate(bme280, prime_samples=state.alt_prime_samples)
 		if not ok:
 			return _truncate(("ERR GROUND %s" % err).encode("utf-8", errors="replace"))
 		state.ground_hpa = avg
@@ -386,6 +661,40 @@ def handle_wire_line(
 		if state.ground_hpa is None:
 			return b"OK GROUND NONE"
 		return _truncate(("OK GROUND %.2f" % state.ground_hpa).encode("utf-8"))
+
+	if su == "GET IIR":
+		# Lees bij voorkeur de echte chip-waarde; val terug op de state-preset
+		# (bv. wanneer er geen BME280 aangesloten is of de driver ouder is).
+		current: Optional[int] = None
+		if bme280 is not None:
+			current = getattr(bme280, "iir_filter", None)
+		if current is None:
+			current = _desired_iir_for_mode(state)
+		return _truncate(
+			(
+				"OK IIR %d CFG=%d MIS=%d"
+				% (int(current), int(state.config_iir), int(state.mission_iir))
+			).encode("utf-8")
+		)
+
+	if len(tokens) == 3 and tokens[0].upper() == "SET" and tokens[1].upper() == "IIR":
+		# Manueel overschrijven van de CONFIG-preset. Alleen toegestaan in CONFIG
+		# zodat we tijdens TEST/MISSION nooit de filter-lag van onder de missie
+		# uit trekken; daar telt ``mission_iir``.
+		if state.mode != "CONFIG":
+			return b"ERR BUSY"
+		try:
+			coef = int(tokens[2])
+		except ValueError:
+			return b"ERR BAD IIR"
+		if coef not in _IIR_ALLOWED:
+			return b"ERR BAD IIR"
+		state.config_iir = coef
+		new_val = apply_mode_iir(state, bme280)
+		# Als er geen BME280 / setter is, bevestigen we toch dat de preset is
+		# bijgewerkt (handig voor dry-run / tests).
+		reported = int(new_val) if new_val is not None else coef
+		return _truncate(("OK IIR %d" % reported).encode("utf-8"))
 
 	if len(tokens) == 4 and tokens[0].upper() == "SET" and tokens[1].upper() == "TRIGGER":
 		which = tokens[2].upper()
@@ -430,13 +739,40 @@ def handle_wire_line(
 			return b"ERR NO BME280"
 		if state.ground_hpa is None:
 			return b"ERR NO GROUND"
+		# Priming-burst: doe N samples back-to-back zodat het IIR-filter de echte
+		# huidige druk weer "ingehaald" heeft, ook als er secondes geen GET ALT
+		# was. Alleen de LAATSTE read wordt gerapporteerd / in apogee verwerkt.
+		n = max(1, int(state.alt_prime_samples))
+		p_hpa: float = 0.0
 		try:
-			_, p_hpa, _ = bme280.read()
+			for _ in range(n):
+				_, p_hpa, _ = bme280.read()
 		except Exception as e:  # noqa: BLE001
 			return _truncate(("ERR BME280 %s" % e).encode("utf-8", errors="replace"))
 		alt = pressure_to_altitude_m(float(p_hpa), float(state.ground_hpa))
 		_update_apogee(state, alt, float(p_hpa))
 		return _truncate(("OK ALT %.2f %.2f" % (alt, float(p_hpa))).encode("utf-8"))
+
+	if su == "GET ALT PRIME":
+		return _truncate(("OK ALT PRIME %d" % int(state.alt_prime_samples)).encode("utf-8"))
+
+	if (
+		len(tokens) == 4
+		and tokens[0].upper() == "SET"
+		and tokens[1].upper() == "ALT"
+		and tokens[2].upper() == "PRIME"
+	):
+		# Tijdens MISSION/TEST nooit retunen; daar moet de tuning vastliggen.
+		if state.mode != "CONFIG":
+			return b"ERR BUSY"
+		try:
+			n = int(tokens[3])
+		except ValueError:
+			return b"ERR BAD PRIME"
+		if not (ALT_PRIME_MIN <= n <= ALT_PRIME_MAX):
+			return b"ERR BAD PRIME"
+		state.alt_prime_samples = n
+		return _truncate(("OK ALT PRIME %d" % n).encode("utf-8"))
 
 	if su == "GET APOGEE":
 		if state.max_alt_m is None:

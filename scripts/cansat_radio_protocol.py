@@ -159,9 +159,28 @@ def main() -> int:
 	p.add_argument(
 		"--bme280-iir",
 		type=int,
+		default=4,
+		choices=[0, 2, 4, 8, 16],
+		help="BME280 IIR bij boot (CONFIG-preset). 4 = snelle step-response voor !alt / !calground; "
+		"wordt bij SET MODE TEST/MISSION automatisch opgetild naar --bme280-iir-mission.",
+	)
+	p.add_argument(
+		"--bme280-iir-mission",
+		type=int,
 		default=16,
 		choices=[0, 2, 4, 8, 16],
-		help="BME280 IIR-filter coëfficient (0=uit, 2/4/8/16); default 16 dempt hoogfrequente ruis tot ~0.3 Pa RMS (~2 cm).",
+		help="BME280 IIR-preset voor TEST/MISSION. Default 16 dempt hoogfrequente ruis tot ~0.3 Pa RMS "
+		"(~2 cm); wordt automatisch toegepast op SET MODE TEST/MISSION en teruggerold op END_TEST / "
+		"SET MODE CONFIG.",
+	)
+	p.add_argument(
+		"--bme280-alt-prime",
+		type=int,
+		default=5,
+		metavar="N",
+		help="Aantal back-to-back BME280-reads per GET ALT (1..32). Vult het IIR-filter zodat één "
+		"losse GET ALT meteen accuraat is, ook na lange stilte. 1 = oud gedrag (geen priming). "
+		"Default 5 = ~750 ms bij OSP×16; live bij te stellen via SET ALT PRIME N.",
 	)
 	p.add_argument(
 		"--no-bme280",
@@ -275,7 +294,15 @@ def main() -> int:
 		print("WARN: geen", i2c_dev, "— BNO055 over radio uit", file=sys.stderr)
 
 	from cansat_hw.radio import RFM69
-	from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+	from cansat_hw.radio.wire_protocol import (
+		RadioRuntimeState,
+		apply_mode_iir,
+		build_telemetry_packet,
+		handle_wire_line,
+		test_mode_advance_tlm,
+		test_mode_end,
+		test_mode_tick,
+	)
 
 	rfm = RFM69(
 		spi_bus=args.spi_bus,
@@ -283,7 +310,19 @@ def main() -> int:
 		reset_pin=args.reset_pin,
 		dio0_pin=args.dio0_pin,
 	)
-	state = RadioRuntimeState()
+	from cansat_hw.radio.wire_protocol import ALT_PRIME_MAX, ALT_PRIME_MIN
+
+	alt_prime = max(ALT_PRIME_MIN, min(ALT_PRIME_MAX, int(args.bme280_alt_prime)))
+	if alt_prime != args.bme280_alt_prime:
+		print(
+			f"WARN: --bme280-alt-prime geclamped naar {alt_prime} ({ALT_PRIME_MIN}..{ALT_PRIME_MAX})",
+			file=sys.stderr,
+		)
+	state = RadioRuntimeState(
+		config_iir=int(args.bme280_iir),
+		mission_iir=int(args.bme280_iir_mission),
+		alt_prime_samples=alt_prime,
+	)
 	runtime_path = Path(args.runtime_path).expanduser()
 	persisted_freq = _load_persisted_freq(runtime_path)
 	if persisted_freq is not None:
@@ -320,14 +359,47 @@ def main() -> int:
 			f"({banner_tail})",
 		)
 		while True:
+			# TEST-mode: timer + periodieke telemetrie vóór we verder luisteren.
+			# Geen threads, geen locking — pure coöperatieve scheduling tussen
+			# twee opeenvolgende receive()-calls. Veilig op de Zero 2 W en
+			# voorkomt half-duplex conflicten met inkomende commando's.
+			send_tlm, end_test = test_mode_tick(state)
+			if end_test:
+				dest = state.test_dest_node if state.test_dest_node is not None else args.dest
+				evt = b"EVT MODE CONFIG END_TEST"
+				ok_evt = rfm.send(evt, keep_listening=True, destination=dest)
+				if args.verbose or not ok_evt:
+					print(
+						"TEST: timer expired, EVT MODE CONFIG ->",
+						dest,
+						"ok=",
+						ok_evt,
+					)
+				test_mode_end(state)
+				# Terug naar de responsieve CONFIG-IIR (bv. 4) zodat !alt weer
+				# snel reageert; test_mode_end heeft state.mode al op CONFIG gezet.
+				apply_mode_iir(state, bme280)
+			elif send_tlm:
+				dest = state.test_dest_node if state.test_dest_node is not None else args.dest
+				tlm = build_telemetry_packet(state, bme280, bno055)
+				ok_tlm = rfm.send(tlm, keep_listening=True, destination=dest)
+				if args.verbose:
+					print("TLM ->", dest, ":", tlm.decode("utf-8", errors="replace"), "ok=", ok_tlm)
+				elif not ok_tlm:
+					print("WARN: TLM TX failed (radio timeout)", file=sys.stderr)
+				test_mode_advance_tlm(state)
+
+			# Korte receive-timeout tijdens TEST zodat de timer/interval responsief blijft.
+			rx_timeout = 0.2 if state.mode == "TEST" else args.poll
 			# with_header=True: afzender = byte 1 voor reply destination
 			# with_ack=False: geen RadioHead-ACK vóór onze tekstantwoord
-			pkt = rfm.receive(timeout=args.poll, with_header=True, with_ack=False, keep_listening=True)
+			pkt = rfm.receive(timeout=rx_timeout, with_header=True, with_ack=False, keep_listening=True)
 			if pkt is None:
 				continue
 			if len(pkt) < 5:
 				continue
 			from_node = pkt[1]
+			mode_before = state.mode
 			try:
 				line = pkt[4:].decode("utf-8")
 			except UnicodeDecodeError:
@@ -356,6 +428,13 @@ def main() -> int:
 				print("WARN: reply TX failed (radio timeout)", file=sys.stderr)
 			if args.verbose:
 				print("state.mode =", state.mode)
+
+			# Net overgegaan naar TEST? Onthoud wie het vroeg zodat
+			# unsolicited TLM/EVT naar datzelfde node terug gaan.
+			if mode_before != "TEST" and state.mode == "TEST" and ok:
+				state.test_dest_node = int(from_node)
+				if args.verbose:
+					print("TEST: destination set to node", from_node)
 
 			if state.pending_freq_mhz is not None and ok:
 				new_freq = float(state.pending_freq_mhz)

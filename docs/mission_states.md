@@ -22,7 +22,7 @@ Zo raken we **niet in de war** tussen “we zitten in missiemodus op de radio”
 
 ---
 
-## Laag 1 — Pico: `CONFIG` en `MISSION`
+## Laag 1 — Pico: `CONFIG`, `MISSION` en `TEST`
 
 Deze modi bepalen vooral **wat de grondstation-begeleiding nog mag sturen** en hoe “druk” de radio-sessie is.
 
@@ -30,8 +30,24 @@ Deze modi bepalen vooral **wat de grondstation-begeleiding nog mag sturen** en h
 |--------------|------------------------|---------------------------|
 | **`CONFIG`** | **Configuratie** (opstellen, testen, klaarzetten voor lancering) | Pico start hier typisch de radio-communicatie. Je mag commando’s sturen: frequentie instellen, sensoren uitlezen, later ook “start de missie”. **Hier** doen we o.a. IMU-calibratie (rustig laten werken) en **nul-luchtdruk op de Zero** vastleggen (referentie voor hoogte). |
 | **`MISSION`** | **Missiemodus** (vluchtsoftware is actief; geen losse “CONFIG-sessie” meer) | De Zero draait de echte vluchtfases (zie laag 2). De Pico stuurt vooral **telemetrie** en luistert beperkt naar het grondstation — vergelijkbaar met het idee “we zijn bezig, niet alles onderbreken”. *(Vroeger heette dit in oefeningen soms `LAUNCH`; in de code heet het nu consequent `MISSION`.)* |
+| **`TEST`** | **Test-modus** (DEPLOYED nabootsen met een timer i.p.v. triggers) | Een **dry-run** van de `DEPLOYED`-fase. De Zero voert DEPLOYED-taken uit, pusht telemetrie, en valt na een vaste **timer** (default 10 s, instelbaar 2..60 s) automatisch terug naar `CONFIG`. Handig om `DEPLOYED`-gedrag te bouwen en testen **zonder** echte trigger-drempels te moeten forceren. **Geen abort**: eenmaal gestart loopt de timer uit. |
 
 **Belangrijk:** `MISSION` betekent dus **niet** automatisch “de raket is al weg”. Het betekent: **we zijn vanaf nu in het scenario “vlucht”**; of je nog op de grond staat, bepaalt **laag 2**.
+
+### `TEST`-modus — dry-run van `DEPLOYED`
+
+Stroom:
+
+1. Base station stuurt `SET MODE TEST [seconds]` (default 10). Eerst gaat de Zero door een **minimale preflight**: `TIME`, `GND`, `BME` (geen `IMU`/`DSK`/`LOG`/`FRQ`/`GIM`). Ontbreekt er iets → `ERR PRE TIME GND BME` (wat van toepassing is) en de Zero blijft in `CONFIG`.
+2. Slaagt de preflight → `OK MODE TEST <seconds>` en de Zero schakelt naar `TEST`.
+3. Elke seconde pusht de Zero een **telemetrie-frame** naar het base station:
+   `TLM <dt_ms> <alt_m> <p_hpa> <T_c> <heading> <roll> <pitch> <sys_cal>` (≤ 60 bytes). Ontbrekende sensoren leveren `NA` op de plaats van die waarde.
+4. Tijdens `TEST` blokkeert de Zero alles behalve `PING`, `GET MODE`, `GET TIME` met `ERR BUSY TEST`. Ook `SET MODE CONFIG` en `STOP RADIO` worden geweigerd — bewust, zodat de dry-run representatief is en niet halverwege onderbroken wordt.
+5. Na de timer stuurt de Zero ongevraagd **één** event naar het base station: `EVT MODE CONFIG END_TEST`, en herstelt intern naar `CONFIG`. De Pico-CLI detecteert dit event automatisch en valt terug op de prompt. `MODE_LAST` (voor de JSONL-log) wordt meteen bijgewerkt.
+
+Base-station-kant (Pico): `!test [seconds]` doet bovenstaande in één beweging — stuur, luister, terug naar prompt. Met `!log on` actief eindigt elk TLM-frame (inclusief geparste velden) in het JSONL-bestand zodat je achteraf met pandas door de test kan scrollen.
+
+**Phase 1 (nu in code)** dekt alleen telemetrie (BME280 + BNO055). Camera en gimbal komen in een latere fase erbij — het skelet blijft identiek.
 
 ---
 
@@ -107,7 +123,7 @@ en **bij opstart** weer inlezen voordat je naar `MISSION` gaat. **Eén “bron v
 
 ## Link met bestaande code in deze repository
 
-In `src/cansat_hw/radio/wire_protocol.py` staat `RadioRuntimeState` met **`CONFIG`** en **`MISSION`**. Draad-commando’s: `SET MODE MISSION` / `GET MODE` (antwoord `OK MODE MISSION`). Voor oude scripts en notities blijft **`SET MODE LAUNCH`** nog als **alias** werken; de CanSat antwoordt dan met **`OK MODE MISSION`** en zet intern dezelfde modus. In missiemodus weigert de Zero de meeste commando’s met **`ERR BUSY MISSION`**.
+In `src/cansat_hw/radio/wire_protocol.py` staat `RadioRuntimeState` met **`CONFIG`**, **`MISSION`** en **`TEST`**. Draad-commando’s: `SET MODE MISSION` / `GET MODE` (antwoord `OK MODE MISSION`). Voor oude scripts en notities blijft **`SET MODE LAUNCH`** nog als **alias** werken; de CanSat antwoordt dan met **`OK MODE MISSION`** en zet intern dezelfde modus. In missiemodus weigert de Zero de meeste commando’s met **`ERR BUSY MISSION`**, in testmodus met **`ERR BUSY TEST`**. `SET MODE TEST [seconds]` start de dry-run (zie boven); `GET MODE` in testmodus antwoordt met `OK MODE TEST <seconds>`.
 
 ### MISSION-preflight (sanity check vóór `PAD_IDLE`)
 
@@ -127,6 +143,30 @@ In `src/cansat_hw/radio/wire_protocol.py` staat `RadioRuntimeState` met **`CONFI
 `PREFLIGHT`-OK-antwoord bevat ook de **trigger-defaults** (`ASC`, `DEP`, `LND`) zodat het team ze kan bevestigen. Korte versie: `ASC` in **meters stijging**, `DEP` in **seconden**, `LND` in **meters** boven grond. `GET TRIGGERS` toont zodra grond gekend is ook het hPa-equivalent van `ASC`, bv. `ASC=5.0m/0.60hPa`.
 
 Volledige uitleg per trigger (gebeurtenis, sensor, tuning-tips, instelcommando's): **[Mission triggers](mission_triggers.md)**.
+
+### BME280 IIR-filter per mode (responsief vs. stil)
+
+De BME280 draait in **forced mode**: het filter verwerkt alleen samples die we **expliciet** lezen. Een hoge IIR-coëfficient (×16) dempt ruis tot ~0.3 Pa RMS (~2 cm), maar heeft **10–12 s** nodig om 99 % van een echte hoogteverandering te bereiken — dat voelt traag bij een handmatig `!alt` in `CONFIG`.
+
+Daarom wisselt de Zero de filter-coëfficient automatisch mee met de mode:
+
+| Mode | Default IIR | Instelbaar via |
+|------|-------------|----------------|
+| `CONFIG` | 4 (snelle step-response; `!alt` reageert binnen ~1 s) | `--bme280-iir` bij opstart, of `SET IIR <0|2|4|8|16>` tijdens CONFIG |
+| `TEST` / `MISSION` | 16 (stil signaal voor apogee- en deploy-detectie) | `--bme280-iir-mission` bij opstart |
+
+- `SET MODE TEST` / `SET MODE MISSION` → chip wordt op `MIS`-preset gezet (default 16).
+- `EVT MODE CONFIG END_TEST` en `SET MODE CONFIG` → chip wordt teruggerold naar `CFG`-preset (default 4).
+- `SET IIR` wordt geweigerd buiten `CONFIG` (`ERR BUSY` / `ERR BUSY TEST|MISSION`) zodat de missie nooit ongemerkt een trage filter krijgt tijdens een kritieke fase.
+- `GET IIR` mag altijd en toont zowel de huidige chip-waarde als beide presets.
+
+#### `GET ALT` priming-burst
+
+In forced mode advanceert het IIR-filter alleen wanneer er gesampled wordt. Tussen twee handmatige `!alt`'s gebeurt er niets, en met IIR×4 zou één losse `GET ALT` na lange stilte slechts ~25 % van een echte hoogteverandering zien. Daarom doet de Zero per `GET ALT` standaard **5 back-to-back reads** (~750 ms bij OSP×16) en rapporteert de laatste:
+
+- Live aanpasbaar in CONFIG via `SET ALT PRIME <1..32>` of het Pico-commando `!altprime N`.
+- `SET ALT PRIME 1` = oud gedrag (geen priming, snelste reply, maar afhankelijk van hoeveel samples het filter recent kreeg).
+- In `TEST`/`MISSION` is `SET ALT PRIME` geweigerd; daar staat de Zero al continu te samplen via de TLM-loop, dus is priming overbodig en zou aanpassen tijdens een kritieke fase ongewenst zijn.
 
 ---
 

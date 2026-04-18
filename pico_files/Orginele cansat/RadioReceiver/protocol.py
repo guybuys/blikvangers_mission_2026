@@ -38,6 +38,15 @@ Conventies
     ``RESET APOGEE``  ->  ``OK APOGEE RESET`` (alleen CONFIG)
     ``PREFLIGHT``  ->  ``OK PRE ALL GND=… ASC=… DEP=… LND=…`` of ``ERR PRE TIME GND BME IMU DSK LOG FRQ GIM``
     ``SET MODE MISSION`` antwoordt ``ERR PRE …`` zolang niet alles klaar is.
+- BME280 IIR-filter (demping vs. responsie):
+    ``GET IIR``  ->  ``OK IIR <coef> CFG=<n> MIS=<n>`` (huidige chip-waarde + CONFIG/MISSION presets)
+    ``SET IIR <0|2|4|8|16>``  ->  ``OK IIR <coef>`` (alleen CONFIG; werkt meteen + onthoudt als CFG-preset)
+    Bij ``SET MODE TEST`` en ``SET MODE MISSION`` wordt automatisch ``MIS=16`` toegepast;
+    bij einde-TEST (``EVT MODE CONFIG END_TEST``) en ``SET MODE CONFIG`` wordt teruggerold naar CFG (default 4).
+- GET ALT priming (vult het IIR-filter per losse GET ALT zodat één call meteen accuraat is):
+    ``GET ALT PRIME``  ->  ``OK ALT PRIME <n>`` (huidig aantal back-to-back samples per GET ALT)
+    ``SET ALT PRIME <1..32>``  ->  ``OK ALT PRIME <n>`` (alleen CONFIG)
+    Default 5 (≈750 ms bij OSP×16). Hogere N = accuratere meting na lange stilte; trage replies. N=1 = oud gedrag.
 
 Lokale Pico-commando's (niet over de lucht) beginnen met ``!`` — zie basestation_cli.py
 """
@@ -77,6 +86,8 @@ def help_wire_commands() -> str:
 		"  GET APOGEE              (piek-hoogte sinds RESET APOGEE)\n"
 		"  RESET APOGEE            (apogee-teller herbeginnen, CONFIG)\n"
 		"  PREFLIGHT               (MISSION-gate check; SET MODE MISSION gebruikt 'm automatisch)\n"
+		"  GET IIR / SET IIR <0|2|4|8|16>  (BME280-filter; laag = snel, hoog = stil)\n"
+		"  GET ALT PRIME / SET ALT PRIME <1..32>  (samples per GET ALT; meer = accurater, trager)\n"
 		"  STOP RADIO              (Zero stopt de commando-loop na OK-antwoord)\n"
 		"  READ BME280 / BME280   (druk/temp/RH)\n"
 		"  READ BNO055 / BNO055   (euler + cal; fusion IMU)\n"

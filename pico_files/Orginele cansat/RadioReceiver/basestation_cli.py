@@ -58,7 +58,7 @@ else:
 	print("WARN: secrets.py niet gevonden — RFM69 draait met de publieke demo-key.")
 	print("      Zie secrets.example.py; kopieer naar secrets.py op de Pico.")
 
-REPLY_TIMEOUT_S = 2.0
+REPLY_TIMEOUT_S = 4.0
 # Korte pauze na eigen TX vóór RX — geeft de CanSat tijd om naar RX te gaan (half-duplex).
 REPLY_GAP_S = 0.05
 
@@ -159,6 +159,13 @@ def _try_floats(base, pairs):
 	return base
 
 
+def _try_float(s):
+	try:
+		return float(s)
+	except (ValueError, TypeError):
+		return s
+
+
 def _parse_reply(text):
 	"""Ontleed een wire-reply naar een dict. None als er niks te matchen valt."""
 	parts = text.strip().split()
@@ -166,11 +173,31 @@ def _parse_reply(text):
 		return None
 	if parts[0] == "ERR":
 		return {"kind": "ERR", "err": " ".join(parts[1:])}
+	if parts[0] == "TLM" and len(parts) >= 9:
+		return {
+			"kind": "TLM",
+			"dt_ms": _try_float(parts[1]),
+			"alt_m": _try_float(parts[2]),
+			"pressure_hpa": _try_float(parts[3]),
+			"temp_c": _try_float(parts[4]),
+			"heading_deg": _try_float(parts[5]),
+			"roll_deg": _try_float(parts[6]),
+			"pitch_deg": _try_float(parts[7]),
+			"bno_sys_cal": _try_float(parts[8]),
+		}
+	if parts[0] == "EVT" and len(parts) >= 3 and parts[1] == "MODE":
+		return {
+			"kind": "EVT_MODE",
+			"mode": parts[2],
+			"reason": " ".join(parts[3:]) if len(parts) >= 4 else "",
+		}
 	if parts[0] != "OK" or len(parts) < 2:
 		return None
 	kind = parts[1]
-	if kind == "ALT" and len(parts) >= 4:
+	if kind == "ALT" and len(parts) >= 4 and parts[2].upper() != "PRIME":
 		return _try_floats({"kind": "ALT"}, (("alt_m", parts[2]), ("pressure_hpa", parts[3])))
+	if kind == "ALT" and len(parts) >= 4 and parts[2].upper() == "PRIME":
+		return _try_floats({"kind": "ALT_PRIME"}, (("samples", parts[3]),))
 	if kind == "APOGEE":
 		if len(parts) >= 5:
 			return _try_floats({"kind": "APOGEE"}, (("alt_m", parts[2]), ("pressure_hpa", parts[3]), ("age_s", parts[4])))
@@ -188,6 +215,13 @@ def _parse_reply(text):
 		return out
 	if kind == "BME280" and len(parts) >= 5:
 		return _try_floats({"kind": "BME280"}, (("temp_c", parts[2]), ("pressure_hpa", parts[3]), ("humidity_pct", parts[4])))
+	if kind == "IIR" and len(parts) >= 3:
+		out = _try_floats({"kind": "IIR"}, (("iir", parts[2]),))
+		for token in parts[3:]:
+			if "=" in token:
+				k, _, v = token.partition("=")
+				out[k.lower()] = _try_float(v)
+		return out
 	if kind == "BNO055":
 		return {"kind": "BNO055", "raw": " ".join(parts[2:])}
 	if kind == "TRIG":
@@ -199,7 +233,14 @@ def _parse_reply(text):
 
 def _update_mode_from_parsed(parsed):
 	global MODE_LAST
-	if parsed and parsed.get("kind") == "MODE":
+	if not parsed:
+		return
+	k = parsed.get("kind")
+	if k == "MODE":
+		m = parsed.get("mode")
+		if isinstance(m, str):
+			MODE_LAST = m
+	elif k == "EVT_MODE":
 		m = parsed.get("mode")
 		if isinstance(m, str):
 			MODE_LAST = m
@@ -271,7 +312,10 @@ def _print_help_local():
 	print("  !alt           stuur GET ALT (hoogte in m boven grond + actuele druk)")
 	print("  !apogee        stuur GET APOGEE (hoogste hoogte sinds laatste reset + leeftijd)")
 	print("  !resetapogee   stuur RESET APOGEE (apogee-tracking opnieuw beginnen)")
+	print("  !iir [N]       zonder N: GET IIR; met N (0/2/4/8/16): SET IIR N — lager = sneller, hoger = stiller")
+	print("  !altprime [N]  zonder N: GET ALT PRIME; met N (1..32): SET ALT PRIME N — meer = accuratere !alt, trager")
 	print("  !listen        alleen ontvangen (ACK aan) tot Ctrl+C — Thonny: stop knop")
+	print("  !test [s]      vraag TEST-mode op de CanSat (default 10s, 2..60), luister naar TLM")
 	print("  !log on [pad]  start JSONL-log (default cansat_<ts>.jsonl op Pico-flash)")
 	print("  !log off       sluit de huidige log af")
 	print("  !log status    toont of er gelogd wordt + pad")
@@ -342,6 +386,43 @@ def _handle_local(line: str) -> bool:
 		_send_and_wait_reply("GET APOGEE")
 	elif cmd == "!resetapogee":
 		_send_and_wait_reply("RESET APOGEE")
+	elif cmd == "!iir":
+		if len(parts) >= 2:
+			arg = parts[1].strip()
+			try:
+				coef = int(arg)
+			except ValueError:
+				print("ERR: !iir <0|2|4|8|16>")
+				return True
+			if coef not in (0, 2, 4, 8, 16):
+				print("ERR: !iir <0|2|4|8|16>")
+				return True
+			_send_and_wait_reply("SET IIR %d" % coef)
+		else:
+			_send_and_wait_reply("GET IIR")
+	elif cmd == "!altprime":
+		if len(parts) >= 2:
+			arg = parts[1].strip()
+			try:
+				n = int(arg)
+			except ValueError:
+				print("ERR: !altprime <1..32>")
+				return True
+			if not (1 <= n <= 32):
+				print("ERR: !altprime <1..32>")
+				return True
+			_send_and_wait_reply("SET ALT PRIME %d" % n)
+		else:
+			_send_and_wait_reply("GET ALT PRIME")
+	elif cmd == "!test":
+		seconds = 10.0
+		if len(parts) >= 2:
+			try:
+				seconds = float(parts[1])
+			except ValueError:
+				print("ERR: !test [seconden] — bv. !test 10")
+				return True
+		_run_test_mode(seconds)
 	elif cmd == "!log":
 		sub = parts[1].lower() if len(parts) >= 2 else "status"
 		if sub == "on":
@@ -409,6 +490,76 @@ def _post_process_reply(sent_line, reply_text):
 	if err:
 		print("WARN: persist freq mislukte:", err)
 	print("Lokale Pico RF-freq gesynchroniseerd:", new_mhz, "MHz (persistent)")
+
+
+def _run_test_mode(seconds):
+	"""Start TEST-mode op de CanSat en luister (read-only) tot EVT MODE CONFIG.
+
+	Werking:
+	  1. Stuur ``SET MODE TEST <seconds>`` en wacht op antwoord (mag ook ``ERR PRE …`` zijn).
+	  2. Bij ``OK MODE TEST …`` gaan we ``seconds + 3`` seconden luisteren naar TLM en
+	     het ``EVT MODE CONFIG``-event dat de CanSat na afloop stuurt.
+	  3. Zodra dat event binnenkomt vallen we terug op de prompt. Lokale mode-markering
+	     (``MODE_LAST``) wordt automatisch bijgewerkt via ``_parse_reply``.
+	"""
+	wire = "SET MODE TEST %g" % float(seconds)
+	payload = validate_wire_line(wire).encode("utf-8")
+	if len(payload) > MAX_PAYLOAD:
+		print("ERR payload te lang")
+		return
+	ok = rfm.send(payload, keep_listening=True)
+	if not ok:
+		print("ERR TX timeout (radio)")
+		_log_emit("ERR", wire, extra={"why": "tx-timeout"})
+		return
+	print("TX ->", wire)
+	_log_emit("TX", wire)
+	if REPLY_GAP_S > 0:
+		time.sleep(REPLY_GAP_S)
+	pkt = rfm.receive(timeout=REPLY_TIMEOUT_S, with_ack=False, keep_listening=True)
+	if pkt is None:
+		print("(geen antwoord binnen %.1f s)" % REPLY_TIMEOUT_S)
+		_log_emit("TIMEOUT", wire, extra={"timeout_s": REPLY_TIMEOUT_S})
+		return
+	try:
+		reply_text = str(pkt, "utf-8")
+	except Exception:
+		reply_text = ""
+	print("RX <-", pkt)
+	print("    ASCII:", reply_text)
+	print("    RSSI:", rfm.last_rssi)
+	parsed = _parse_reply(reply_text) if reply_text else None
+	_update_mode_from_parsed(parsed)
+	_log_emit("RX", reply_text, rssi=rfm.last_rssi, parsed=parsed)
+	if not reply_text.startswith("OK MODE TEST"):
+		print("TEST-mode niet gestart — zie reply.")
+		return
+	deadline_s = time.ticks_add(time.ticks_ms(), int((float(seconds) + 3.0) * 1000))
+	print("Listen-only voor TLM (%.1f s + 3s buffer); Ctrl+C om vroeger te stoppen." % float(seconds))
+	frames = 0
+	try:
+		while time.ticks_diff(deadline_s, time.ticks_ms()) > 0:
+			rx = rfm.receive(with_ack=False, timeout=0.5, keep_listening=True)
+			if rx is None:
+				continue
+			try:
+				rx_text = str(rx, "utf-8")
+			except Exception:
+				rx_text = ""
+			print("RX:", rx_text if rx_text else rx)
+			print("    RSSI:", rfm.last_rssi)
+			rx_parsed = _parse_reply(rx_text) if rx_text else None
+			_update_mode_from_parsed(rx_parsed)
+			_log_emit("RX", rx_text, rssi=rfm.last_rssi, parsed=rx_parsed, extra={"test": True})
+			frames += 1
+			if rx_parsed and rx_parsed.get("kind") == "EVT_MODE" and rx_parsed.get("mode") == "CONFIG":
+				print("TEST-mode afgesloten (EVT MODE CONFIG). Frames:", frames)
+				return
+	except KeyboardInterrupt:
+		print()
+		print("Listen onderbroken.")
+		return
+	print("TEST-mode listen-window afgelopen (geen EVT ontvangen). Frames:", frames)
 
 
 def _send_and_wait_reply(wire_line: str):

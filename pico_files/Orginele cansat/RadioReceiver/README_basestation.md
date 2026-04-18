@@ -49,7 +49,7 @@ Op de **CanSat (Zero 2 W)** draait `cansat_radio_protocol.py` **zonder** toetsen
 | `!freq 433.0` | RF-frequentie op **deze** Pico |
 | `!dest 120` | RadioHead-bestemming (CanSat-node op de Zero) |
 | `!node 100` | Eigen node (base station) |
-| `!timeout 2.0` | Seconden wachten op antwoord na zenden |
+| `!timeout 4.0` | Seconden wachten op antwoord na zenden (default 4 s — hoog genoeg voor `CAL GROUND`/`PREFLIGHT` met IIR×16) |
 | `!gap 0.05` | Pauze na eigen TX vóór RX (half-duplex) |
 | `!info` | Huidige instellingen |
 | `!time` | Stuurt `SET TIME <epoch>` naar de CanSat (MicroPython `time.time()` — voor juiste tijd: Pico-klok syncen vanaf Thonny/laptop, zie hieronder) |
@@ -61,7 +61,10 @@ Op de **CanSat (Zero 2 W)** draait `cansat_radio_protocol.py` **zonder** toetsen
 | `!alt` | Stuurt `GET ALT` — hoogte boven grondreferentie + actuele druk (werkt ook in MISSION) |
 | `!apogee` | Stuurt `GET APOGEE` — hoogste hoogte tot nu toe, bijhorende druk en ouderdom in s |
 | `!resetapogee` | Stuurt `RESET APOGEE` — apogee-tracking herbeginnen (alleen CONFIG) |
+| `!iir [N]` | Zonder argument: stuurt `GET IIR` (toont chip-waarde + CFG/MIS presets). Met `N` ∈ `{0,2,4,8,16}`: stuurt `SET IIR N` — lagere coëfficient = snellere response bij `!alt`, hogere = stiller signaal maar tragere step-response. |
+| `!altprime [N]` | Zonder argument: `GET ALT PRIME` (huidig aantal samples per `!alt`). Met `N` ∈ `[1..32]`: `SET ALT PRIME N` — meer samples = accurater (filter krijgt N samples om bij te benen) maar tragere reply (~150 ms × N bij OSP×16). Default 5. |
 | `!listen` | Alleen RX-loop (tot Stop in Thonny) |
+| `!test [s]` | Vraag **TEST-mode** op de CanSat (default 10 s, 2..60). Luistert daarna read-only tot het `EVT MODE CONFIG`-event binnenkomt (of tot `s + 3` s om zijn). |
 | `!log on [pad]` | Start JSON-lines log op de Pico-flash (default `cansat_<timestamp>.jsonl`) |
 | `!log off` | Sluit de actieve log af |
 | `!log status` | Toont of er gelogd wordt + pad + laatst gekende MISSION-mode |
@@ -80,8 +83,8 @@ Elke TX, RX en TIMEOUT wordt bewaard als één JSON-record per regel (**JSONL**)
 
 - `dt_ms` is altijd aanwezig: monotone milliseconden sinds `!log on`. Betrouwbaar ook zonder RTC.
 - `t` (ISO-tijd) komt erbij zodra de Pico-RTC plausibel gezet is (jaar ≥ 2020), bv. na `SET TIME` + Thonny-sync.
-- `parsed` ontleedt bekende `OK`-replies naar kolom-vriendelijke velden (`alt_m`, `pressure_hpa`, `temp_c`, `humidity_pct`, `ground_hpa`, `freq_mhz`, `epoch`, …) — zo is MISSION-telemetrie direct in `pandas` of een dashboard te gooien.
-- `mode` toont de laatst ontvangen `OK MODE …` zodat je CONFIG- en MISSION-secties makkelijk kunt filteren.
+- `parsed` ontleedt bekende `OK`-replies naar kolom-vriendelijke velden (`alt_m`, `pressure_hpa`, `temp_c`, `humidity_pct`, `ground_hpa`, `freq_mhz`, `epoch`, …) — zo is MISSION-telemetrie direct in `pandas` of een dashboard te gooien. TEST-telemetrie komt binnen als `TLM`-frames met geparste velden `dt_ms`, `alt_m`, `pressure_hpa`, `temp_c`, `heading_deg`, `roll_deg`, `pitch_deg`, `bno_sys_cal`; het afsluitende `EVT MODE CONFIG`-event komt in als `{"kind": "EVT_MODE", "mode": "CONFIG", "reason": "END_TEST"}`.
+- `mode` toont de laatst ontvangen `OK MODE …` (of `EVT MODE …`) zodat je CONFIG-, TEST- en MISSION-secties makkelijk kunt filteren.
 
 Analyseren later (op de laptop):
 
@@ -108,7 +111,7 @@ Voorbeelden:
 - `SET TIME <unix_epoch>` — alleen als de Zero in **CONFIG** staat; zet de **systeemklok** (`OK TIME` of `ERR TIME …`). Op de Zero meestal **root** nodig (bv. systemd-service `User=root`) of `timedatectl` met passende rechten.
 - `GET TIME` — vraagt de huidige **systeemklok** van de Zero op (CONFIG én MISSION toegestaan). Antwoord: `OK TIME <epoch> <ISO local>` bv. `OK TIME 1776462936.401 2026-04-17T23:55:36+02:00`.
 - **MISSION-preflight (alleen CONFIG):**
-  - `CAL GROUND` — BME280-gemiddelde (16 samples) als grondreferentie (`OK GROUND <hPa>`).
+  - `CAL GROUND` — eerst `ALT PRIME` warm-up reads om het IIR-filter bij te benen, daarna 4 reads middelen voor de grondreferentie (`OK GROUND <hPa>`). Default = 5 + 4 = 9 reads ≈ 1.4 s bij OSP×16; zorg dat `!timeout` ≥ 4 s staat. Oude gedrag zonder warm-up gaf systematisch een te lage grondreferentie wanneer het filter lang stilgelegen had.
   - `SET GROUND <hPa>` — grondreferentie handmatig.
   - `GET GROUND` — huidige referentie of `OK GROUND NONE`.
   - `SET TRIGGER ASCENT <m>` / `DEPLOY <m_daling>` / `LAND <m>` — drempels zetten. `ASCENT` = **stijging in meters** t.o.v. grond; `DEPLOY` = **daling in meters vanaf apogee** (fysisch: "zijn we het hoogste punt voorbij?"); `LAND` = meters boven grond voor landing.
@@ -118,7 +121,21 @@ Voorbeelden:
   - `RESET APOGEE` — `OK APOGEE RESET` (alleen CONFIG).
   - `PREFLIGHT` — toont `ERR PRE TIME GND BME IMU DSK LOG FRQ GIM` (alleen wat ontbreekt) of `OK PRE ALL GND=… ASC=… DEP=… LND=…`.
   - `SET MODE MISSION` voert deze check automatisch uit; zolang iets ontbreekt krijg je `ERR PRE …` en **blijft de Zero in CONFIG**.
-- `STOP RADIO` — beëindigt `cansat_radio_protocol.py` **na** het antwoord `OK STOP RADIO` (werkt in CONFIG en MISSION). Handig bij autostart via **systemd**; alternatief: `sudo systemctl stop …` of SSH/`kill`.
+- **BME280 IIR-filter:**
+  - `GET IIR` → `OK IIR <huidige_coef> CFG=<preset> MIS=<preset>`. De huidige waarde is wat er **nu** op de chip staat; `CFG` is wat er in `CONFIG` gebruikt wordt, `MIS` in `TEST`/`MISSION`.
+  - `SET IIR <0|2|4|8|16>` — werkt alleen in `CONFIG` (`ERR BUSY` / `ERR BUSY TEST|MISSION` anders). Stelt zowel de chip als het `CFG`-preset bij. Vuistregel: **lagere** coëfficient ⇒ `!alt` reageert sneller op handmatige hoogteveranderingen; **hogere** coëfficient ⇒ minder ruis maar trager (IIR×16 heeft ~10–12 s nodig om 99 % van een nieuwe waarde te bereiken).
+  - Auto-switch: bij `SET MODE TEST` en `SET MODE MISSION` wordt de `MIS`-preset (default 16) automatisch toegepast; bij einde-TEST (`EVT MODE CONFIG END_TEST`) en `SET MODE CONFIG` rolt de Zero terug naar de `CFG`-preset (default 4). De defaults zijn instelbaar via `--bme280-iir` (CFG) en `--bme280-iir-mission` (MIS) op de Zero.
+- **GET ALT priming:**
+  - De BME280 staat in **forced mode**: tussen twee `GET ALT`-calls sampelt de chip niet, dus het IIR-filter staat stil. Eén losse `!alt` na lange stilte zou anders maar `1/IIR` van een echte hoogteverandering "zien".
+  - Daarom doet de Zero per `GET ALT` standaard **5 back-to-back reads** (≈750 ms bij OSP×16) en rapporteert de laatste. Het filter is daardoor altijd "ingehaald" wanneer je het antwoord ziet.
+  - `GET ALT PRIME` → `OK ALT PRIME <n>`; `SET ALT PRIME <1..32>` (alleen CONFIG) past het aantal samples live aan. Meer = accurater na lange stilte, trager antwoord. `SET ALT PRIME 1` = oud gedrag (1 read).
+  - Default instelbaar bij opstart via `--bme280-alt-prime` op de Zero.
+- **TEST-mode (dry-run van DEPLOYED):**
+  - `SET MODE TEST [seconds]` — start een dry-run van `DEPLOYED` voor `seconds` seconden (default 10, klem 2..60). Eerst loopt een **minimale preflight** (`TIME`, `GND`, `BME`); bij een tekort: `ERR PRE …` en Zero blijft in `CONFIG`. Slaagt de check: `OK MODE TEST <seconds>`, Zero schakelt naar `TEST`.
+  - Tijdens `TEST` pusht de Zero elke seconde ongevraagd één `TLM <dt_ms> <alt_m> <p_hpa> <T_c> <heading> <roll> <pitch> <sys_cal>`-regel naar het base station (ontbrekende sensoren → `NA`).
+  - Alle commando's worden geweigerd met `ERR BUSY TEST` behalve `PING`, `GET MODE`, `GET TIME`. Ook `SET MODE CONFIG` en `STOP RADIO` zijn geblokkeerd — de timer is bewust niet te aborteren.
+  - Na afloop stuurt de Zero éénmalig `EVT MODE CONFIG END_TEST` en herstelt intern naar `CONFIG`. Base station: gebruik `!test [seconds]` om dit in één beweging af te handelen.
+- `STOP RADIO` — beëindigt `cansat_radio_protocol.py` **na** het antwoord `OK STOP RADIO` (werkt in CONFIG en MISSION, **niet** in TEST). Handig bij autostart via **systemd**; alternatief: `sudo systemctl stop …` of SSH/`kill`.
 
 Vrije tekst zonder prefix wordt ook verstuurd (handig om te debuggen).
 

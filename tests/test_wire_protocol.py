@@ -173,6 +173,43 @@ class GroundAndTriggersTest(unittest.TestCase):
 		self.assertTrue(out.startswith(b"OK GROUND "))
 		self.assertAlmostEqual(st.ground_hpa or 0.0, 1010.0, places=2)
 
+	def test_cal_ground_does_warmup_then_average(self) -> None:
+		"""CAL GROUND moet ``alt_prime_samples`` warm-ups doen vóór het middelt."""
+		from cansat_hw.radio.wire_protocol import (
+			GROUND_CAL_SAMPLES,
+			RadioRuntimeState,
+			handle_wire_line,
+		)
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(alt_prime_samples=5)
+		bme = _fake_bme(1010.0)
+		out = handle_wire_line(rfm, st, "CAL GROUND", bme280=bme)
+		self.assertTrue(out.startswith(b"OK GROUND "))
+		# 5 warm-ups + GROUND_CAL_SAMPLES gemiddelde-reads = 9 in totaal.
+		self.assertEqual(bme.read.call_count, 5 + GROUND_CAL_SAMPLES)
+
+	def test_cal_ground_uses_only_post_warmup_samples(self) -> None:
+		"""De gerapporteerde druk moet enkel uit de samples NA de warm-up komen."""
+		from cansat_hw.radio.wire_protocol import (
+			GROUND_CAL_SAMPLES,
+			RadioRuntimeState,
+			handle_wire_line,
+		)
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(alt_prime_samples=3)
+		bme = MagicMock()
+		# Eerste 3 reads zijn warm-up (achterhaalde druk), daarna de echte ~1010.
+		warmup_then_real = [(20.0, 1019.0, 40.0)] * 3 + [
+			(20.0, 1010.0, 40.0)
+		] * GROUND_CAL_SAMPLES
+		bme.read.side_effect = warmup_then_real
+		out = handle_wire_line(rfm, st, "CAL GROUND", bme280=bme)
+		self.assertTrue(out.startswith(b"OK GROUND "))
+		# Warm-up waarden mogen NIET in het gemiddelde meetellen.
+		self.assertAlmostEqual(st.ground_hpa or 0.0, 1010.0, places=2)
+
 	def test_cal_ground_no_sensor(self) -> None:
 		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
 
@@ -388,6 +425,497 @@ class PreflightTest(unittest.TestCase):
 		self.assertIn(b"GND=", out)
 		self.assertIn(b"ASC=", out)
 		self.assertIn(b"m", out)
+
+
+class TestModeTest(unittest.TestCase):
+	def _test_state(self) -> "object":
+		"""State die minimale preflight (TIME+GND+BME) haalt."""
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState
+
+		st = RadioRuntimeState()
+		st.time_synced = True
+		st.ground_hpa = 1013.2
+		return st
+
+	def test_set_mode_test_default_duration(self) -> None:
+		from cansat_hw.radio.wire_protocol import TEST_MODE_DEFAULT_S, handle_wire_line
+
+		rfm = MagicMock()
+		st = self._test_state()
+		out = handle_wire_line(rfm, st, "SET MODE TEST", bme280=_fake_bme())
+		self.assertTrue(out.startswith(b"OK MODE TEST "))
+		self.assertEqual(st.mode, "TEST")
+		self.assertAlmostEqual(st.test_duration_s, TEST_MODE_DEFAULT_S, places=3)
+		self.assertIsNotNone(st.test_deadline_monotonic)
+		self.assertIsNotNone(st.test_next_tlm_monotonic)
+
+	def test_set_mode_test_explicit_duration(self) -> None:
+		from cansat_hw.radio.wire_protocol import handle_wire_line
+
+		rfm = MagicMock()
+		st = self._test_state()
+		out = handle_wire_line(rfm, st, "SET MODE TEST 5", bme280=_fake_bme())
+		self.assertEqual(out, b"OK MODE TEST 5")
+		self.assertAlmostEqual(st.test_duration_s, 5.0, places=3)
+
+	def test_set_mode_test_clamps_too_high(self) -> None:
+		from cansat_hw.radio.wire_protocol import TEST_MODE_MAX_S, handle_wire_line
+
+		rfm = MagicMock()
+		st = self._test_state()
+		out = handle_wire_line(rfm, st, "SET MODE TEST 9999", bme280=_fake_bme())
+		self.assertTrue(out.startswith(b"OK MODE TEST"))
+		self.assertAlmostEqual(st.test_duration_s, TEST_MODE_MAX_S, places=3)
+
+	def test_set_mode_test_clamps_too_low(self) -> None:
+		from cansat_hw.radio.wire_protocol import TEST_MODE_MIN_S, handle_wire_line
+
+		rfm = MagicMock()
+		st = self._test_state()
+		out = handle_wire_line(rfm, st, "SET MODE TEST 0.1", bme280=_fake_bme())
+		self.assertTrue(out.startswith(b"OK MODE TEST"))
+		self.assertAlmostEqual(st.test_duration_s, TEST_MODE_MIN_S, places=3)
+
+	def test_set_mode_test_rejects_non_number(self) -> None:
+		from cansat_hw.radio.wire_protocol import handle_wire_line
+
+		rfm = MagicMock()
+		st = self._test_state()
+		out = handle_wire_line(rfm, st, "SET MODE TEST tien", bme280=_fake_bme())
+		self.assertEqual(out, b"ERR BAD TEST")
+		self.assertEqual(st.mode, "CONFIG")
+
+	@patch(
+		"cansat_hw.radio.wire_protocol._check_time_set",
+		return_value=False,
+	)
+	def test_set_mode_test_blocked_by_minimal_preflight_time(
+		self, _mock: MagicMock
+	) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "SET MODE TEST 5", bme280=_fake_bme())
+		self.assertTrue(out.startswith(b"ERR PRE"))
+		self.assertIn(b"TIME", out)
+		self.assertIn(b"GND", out)
+		self.assertEqual(st.mode, "CONFIG")
+
+	def test_set_mode_test_skips_full_preflight_fields(self) -> None:
+		"""TEST vereist alleen TIME+GND+BME, dus FRQ/IMU/DSK/LOG/GIM NIET."""
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		st.time_synced = True
+		st.ground_hpa = 1013.2
+		# freq_set is niet gezet en bno055 is None — toch moet TEST starten.
+		out = handle_wire_line(rfm, st, "SET MODE TEST 3", bme280=_fake_bme(), bno055=None)
+		self.assertTrue(out.startswith(b"OK MODE TEST"))
+		self.assertEqual(st.mode, "TEST")
+
+	def test_test_mode_blocks_set_time(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="TEST")
+		out = handle_wire_line(rfm, st, "SET TIME 1700000000")
+		self.assertEqual(out, b"ERR BUSY TEST")
+
+	def test_test_mode_blocks_set_mode_config_no_abort(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="TEST")
+		out = handle_wire_line(rfm, st, "SET MODE CONFIG")
+		self.assertEqual(out, b"ERR BUSY TEST")
+		self.assertEqual(st.mode, "TEST")
+
+	def test_test_mode_blocks_stop_radio_no_abort(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="TEST")
+		out = handle_wire_line(rfm, st, "STOP RADIO")
+		self.assertEqual(out, b"ERR BUSY TEST")
+		self.assertFalse(st.exit_after_reply)
+
+	def test_test_mode_allows_ping_and_get_time(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="TEST")
+		self.assertEqual(handle_wire_line(rfm, st, "PING"), b"OK PING")
+		self.assertTrue(handle_wire_line(rfm, st, "GET TIME").startswith(b"OK TIME "))
+
+	def test_get_mode_returns_test_with_duration(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="TEST", test_duration_s=10.0)
+		out = handle_wire_line(rfm, st, "GET MODE")
+		self.assertTrue(out.startswith(b"OK MODE TEST "))
+
+	def test_cannot_start_test_from_mission(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="MISSION")
+		out = handle_wire_line(rfm, st, "SET MODE TEST 5")
+		# MISSION blokkeert alle commando's behalve de allow-list.
+		self.assertEqual(out, b"ERR BUSY MISSION")
+		self.assertEqual(st.mode, "MISSION")
+
+
+class TestModeTickTest(unittest.TestCase):
+	def test_tick_sends_tlm_when_interval_elapsed(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, test_mode_tick
+
+		st = RadioRuntimeState(mode="TEST")
+		st.test_start_monotonic = 100.0
+		st.test_deadline_monotonic = 110.0
+		st.test_next_tlm_monotonic = 100.5
+		send_tlm, end_test = test_mode_tick(st, now_monotonic=100.6)
+		self.assertTrue(send_tlm)
+		self.assertFalse(end_test)
+
+	def test_tick_signals_end_after_deadline(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, test_mode_tick
+
+		st = RadioRuntimeState(mode="TEST")
+		st.test_start_monotonic = 100.0
+		st.test_deadline_monotonic = 110.0
+		st.test_next_tlm_monotonic = 100.5
+		send_tlm, end_test = test_mode_tick(st, now_monotonic=110.01)
+		self.assertFalse(send_tlm)
+		self.assertTrue(end_test)
+
+	def test_tick_inactive_outside_test_mode(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, test_mode_tick
+
+		st = RadioRuntimeState(mode="CONFIG")
+		send_tlm, end_test = test_mode_tick(st, now_monotonic=1e9)
+		self.assertFalse(send_tlm)
+		self.assertFalse(end_test)
+
+	def test_advance_tlm_pushes_deadline_forward(self) -> None:
+		from cansat_hw.radio.wire_protocol import (
+			RadioRuntimeState,
+			TEST_MODE_TLM_INTERVAL_S,
+			test_mode_advance_tlm,
+		)
+
+		st = RadioRuntimeState(mode="TEST")
+		test_mode_advance_tlm(st, now_monotonic=100.0)
+		self.assertAlmostEqual(
+			st.test_next_tlm_monotonic, 100.0 + TEST_MODE_TLM_INTERVAL_S, places=3
+		)
+
+	def test_end_resets_state_to_config(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, test_mode_end
+
+		st = RadioRuntimeState(
+			mode="TEST",
+		)
+		st.test_duration_s = 10.0
+		st.test_start_monotonic = 1.0
+		st.test_deadline_monotonic = 11.0
+		st.test_next_tlm_monotonic = 2.0
+		st.test_dest_node = 100
+		test_mode_end(st)
+		self.assertEqual(st.mode, "CONFIG")
+		self.assertIsNone(st.test_duration_s)
+		self.assertIsNone(st.test_deadline_monotonic)
+		self.assertIsNone(st.test_dest_node)
+
+
+class TelemetryPacketTest(unittest.TestCase):
+	def test_fits_in_max_payload(self) -> None:
+		from cansat_hw.radio.wire_protocol import (
+			MAX_PAYLOAD,
+			RadioRuntimeState,
+			build_telemetry_packet,
+		)
+
+		st = RadioRuntimeState(mode="TEST")
+		st.ground_hpa = 1013.2
+		st.test_start_monotonic = 0.0
+		bme = _fake_bme(1005.0)
+		bno = _fake_bno(3)
+		bno.read_euler = MagicMock(return_value=(123.4, 5.6, -7.8))
+		pkt = build_telemetry_packet(st, bme, bno, now_monotonic=3.456)
+		self.assertTrue(pkt.startswith(b"TLM "))
+		self.assertLessEqual(len(pkt), MAX_PAYLOAD)
+		text = pkt.decode("utf-8")
+		parts = text.split()
+		self.assertEqual(len(parts), 9)
+		self.assertEqual(parts[0], "TLM")
+		self.assertEqual(parts[1], "3456")
+
+	def test_na_tokens_when_sensors_missing(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, build_telemetry_packet
+
+		st = RadioRuntimeState(mode="TEST")
+		st.test_start_monotonic = 0.0
+		pkt = build_telemetry_packet(st, None, None, now_monotonic=1.0)
+		text = pkt.decode("utf-8")
+		parts = text.split()
+		self.assertEqual(parts[0], "TLM")
+		self.assertEqual(parts[1], "1000")
+		# Alles behalve dt_ms moet NA zijn.
+		for token in parts[2:]:
+			self.assertEqual(token, "NA")
+
+	def test_na_alt_when_no_ground_reference(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, build_telemetry_packet
+
+		st = RadioRuntimeState(mode="TEST")
+		st.test_start_monotonic = 0.0
+		# Geen ground_hpa → alt_m = NA, maar pressure/temp zijn er wel.
+		bme = _fake_bme(1013.0)
+		pkt = build_telemetry_packet(st, bme, None, now_monotonic=0.0)
+		parts = pkt.decode("utf-8").split()
+		self.assertEqual(parts[2], "NA")  # alt_m
+		self.assertNotEqual(parts[3], "NA")  # pressure_hpa
+		self.assertNotEqual(parts[4], "NA")  # temp_c
+
+
+class AltPrimeTest(unittest.TestCase):
+	def test_default_alt_prime_is_set(self) -> None:
+		from cansat_hw.radio.wire_protocol import (
+			DEFAULT_ALT_PRIME,
+			RadioRuntimeState,
+		)
+
+		st = RadioRuntimeState()
+		self.assertEqual(st.alt_prime_samples, DEFAULT_ALT_PRIME)
+
+	def test_get_alt_does_priming_burst(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		st.ground_hpa = 1013.25
+		st.alt_prime_samples = 5
+		bme = _fake_bme(p_hpa=1011.0)
+		out = handle_wire_line(rfm, st, "GET ALT", bme280=bme)
+		self.assertTrue(out.startswith(b"OK ALT "))
+		# 5 reads moeten gebeurd zijn — laatste levert de gerapporteerde druk.
+		self.assertEqual(bme.read.call_count, 5)
+
+	def test_get_alt_with_prime_one_does_single_read(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(alt_prime_samples=1)
+		st.ground_hpa = 1013.25
+		bme = _fake_bme(p_hpa=1011.0)
+		handle_wire_line(rfm, st, "GET ALT", bme280=bme)
+		self.assertEqual(bme.read.call_count, 1)
+
+	def test_get_alt_uses_last_sample_for_apogee(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(alt_prime_samples=3)
+		st.ground_hpa = 1013.25
+		bme = MagicMock()
+		# Simuleer een dalend druk-verloop tijdens de burst — laatste read moet tellen.
+		bme.read.side_effect = [
+			(20.0, 1013.0, 40.0),
+			(20.0, 1012.5, 40.0),
+			(20.0, 1010.0, 40.0),
+		]
+		out = handle_wire_line(rfm, st, "GET ALT", bme280=bme)
+		self.assertTrue(out.startswith(b"OK ALT "))
+		parts = out.decode("utf-8").split()
+		# Druk in de reply moet 1010.0 zijn (laatste sample).
+		self.assertAlmostEqual(float(parts[3]), 1010.0, places=2)
+		# Apogee moet ook bij die laatste (hoogste) hoogte horen.
+		self.assertAlmostEqual(float(st.min_pressure_hpa or 0.0), 1010.0, places=2)
+
+	def test_get_alt_prime_returns_current_value(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(alt_prime_samples=7)
+		out = handle_wire_line(rfm, st, "GET ALT PRIME")
+		self.assertEqual(out, b"OK ALT PRIME 7")
+
+	def test_set_alt_prime_in_config(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "SET ALT PRIME 8")
+		self.assertEqual(out, b"OK ALT PRIME 8")
+		self.assertEqual(st.alt_prime_samples, 8)
+
+	def test_set_alt_prime_rejects_out_of_range(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		self.assertEqual(handle_wire_line(rfm, st, "SET ALT PRIME 0"), b"ERR BAD PRIME")
+		self.assertEqual(handle_wire_line(rfm, st, "SET ALT PRIME 99"), b"ERR BAD PRIME")
+		self.assertEqual(handle_wire_line(rfm, st, "SET ALT PRIME abc"), b"ERR BAD PRIME")
+
+	def test_set_alt_prime_blocked_in_mission(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="MISSION")
+		out = handle_wire_line(rfm, st, "SET ALT PRIME 4")
+		# MISSION-busy check vangt het al voor de inner CONFIG-check.
+		self.assertEqual(out, b"ERR BUSY MISSION")
+
+	def test_set_alt_prime_blocked_in_test(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="TEST")
+		out = handle_wire_line(rfm, st, "SET ALT PRIME 4")
+		self.assertEqual(out, b"ERR BUSY TEST")
+
+	def test_get_alt_prime_allowed_in_mission(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="MISSION", alt_prime_samples=5)
+		out = handle_wire_line(rfm, st, "GET ALT PRIME")
+		self.assertEqual(out, b"OK ALT PRIME 5")
+
+
+class IirFilterTest(unittest.TestCase):
+	def test_get_iir_default_cfg_and_mis(self) -> None:
+		from cansat_hw.radio.wire_protocol import (
+			DEFAULT_CONFIG_IIR,
+			DEFAULT_MISSION_IIR,
+			RadioRuntimeState,
+			handle_wire_line,
+		)
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "GET IIR")
+		self.assertTrue(out.startswith(b"OK IIR "))
+		text = out.decode("utf-8")
+		self.assertIn("CFG=%d" % DEFAULT_CONFIG_IIR, text)
+		self.assertIn("MIS=%d" % DEFAULT_MISSION_IIR, text)
+
+	def test_get_iir_reports_chip_value_when_available(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		bme = _fake_bme()
+		bme.iir_filter = 8
+		out = handle_wire_line(rfm, st, "GET IIR", bme280=bme)
+		self.assertIn(b"OK IIR 8", out)
+
+	def test_set_iir_updates_config_preset_and_applies(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		bme = _fake_bme()
+		bme.set_iir_filter.return_value = 8
+		out = handle_wire_line(rfm, st, "SET IIR 8", bme280=bme)
+		self.assertEqual(out, b"OK IIR 8")
+		self.assertEqual(st.config_iir, 8)
+		bme.set_iir_filter.assert_called_with(8)
+
+	def test_set_iir_without_bme_still_updates_preset(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "SET IIR 2")
+		self.assertEqual(out, b"OK IIR 2")
+		self.assertEqual(st.config_iir, 2)
+
+	def test_set_iir_rejects_invalid_coefficient(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		self.assertEqual(handle_wire_line(rfm, st, "SET IIR 5"), b"ERR BAD IIR")
+		self.assertEqual(handle_wire_line(rfm, st, "SET IIR abc"), b"ERR BAD IIR")
+
+	def test_set_iir_blocked_in_mission(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="MISSION")
+		out = handle_wire_line(rfm, st, "SET IIR 4")
+		self.assertEqual(out, b"ERR BUSY MISSION")
+
+	def test_set_iir_blocked_in_test(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="TEST")
+		out = handle_wire_line(rfm, st, "SET IIR 4")
+		self.assertEqual(out, b"ERR BUSY TEST")
+
+	def test_get_iir_allowed_in_test(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="TEST")
+		out = handle_wire_line(rfm, st, "GET IIR")
+		self.assertTrue(out.startswith(b"OK IIR "))
+
+	def test_set_mode_test_applies_mission_iir(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(config_iir=2, mission_iir=16)
+		st.time_synced = True
+		st.ground_hpa = 1013.2
+		bme = _fake_bme()
+		bme.set_iir_filter.return_value = 16
+		out = handle_wire_line(rfm, st, "SET MODE TEST 5", bme280=bme)
+		self.assertTrue(out.startswith(b"OK MODE TEST"))
+		bme.set_iir_filter.assert_called_with(16)
+
+	def test_set_mode_config_restores_config_iir(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="CONFIG", config_iir=4, mission_iir=16)
+		bme = _fake_bme()
+		bme.set_iir_filter.return_value = 4
+		out = handle_wire_line(rfm, st, "SET MODE CONFIG", bme280=bme)
+		self.assertEqual(out, b"OK MODE CONFIG")
+		bme.set_iir_filter.assert_called_with(4)
+
+	def test_apply_mode_iir_safe_without_bme(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, apply_mode_iir
+
+		st = RadioRuntimeState(mode="TEST", mission_iir=16)
+		self.assertIsNone(apply_mode_iir(st, None))
+
+	def test_apply_mode_iir_selects_based_on_mode(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, apply_mode_iir
+
+		bme = _fake_bme()
+		bme.set_iir_filter.side_effect = lambda v: v
+		st = RadioRuntimeState(mode="CONFIG", config_iir=2, mission_iir=16)
+		self.assertEqual(apply_mode_iir(st, bme), 2)
+		st.mode = "TEST"
+		self.assertEqual(apply_mode_iir(st, bme), 16)
+		st.mode = "MISSION"
+		self.assertEqual(apply_mode_iir(st, bme), 16)
+
+	def test_apply_mode_iir_swallows_i2c_errors(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, apply_mode_iir
+
+		bme = _fake_bme()
+		bme.set_iir_filter.side_effect = OSError("bus busy")
+		st = RadioRuntimeState(mode="TEST", mission_iir=16)
+		self.assertIsNone(apply_mode_iir(st, bme))
 
 
 if __name__ == "__main__":
