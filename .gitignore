@@ -11,10 +11,13 @@ build/
 *.swp
 *.swo
 
-# secrets / local env
+# secrets / local env (zie docs/secrets.md)
 .env
 .env.*
 !.env.example
+# MicroPython-conventie op de Pico: secrets.py naast basestation_cli.py
+secrets.py
+!secrets.example.py
 
 # test / tooling caches
 .pytest_cache/

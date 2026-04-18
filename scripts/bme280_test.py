@@ -35,6 +35,13 @@ def main() -> int:
 		choices=(1, 2, 3, 4, 5),
 		help="Oversampling 1..5 (Pico-compat); 1 = snelst, meer ruis; 5 = langzamer, stiller",
 	)
+	p.add_argument(
+		"--iir",
+		type=int,
+		default=0,
+		choices=(0, 2, 4, 8, 16),
+		help="IIR-filter coëfficient (0=uit; 16 aanbevolen voor vlucht — dempt hoogfrequente ruis)",
+	)
 	p.add_argument("--chip-id", action="store_true", help="Lees chip-id (0x60) en stop")
 	p.add_argument("--samples", type=int, default=10, help="Aantal metingen")
 	p.add_argument(
@@ -57,7 +64,7 @@ def main() -> int:
 		return 1
 
 	try:
-		with BME280(args.bus, args.address, oversampling=args.os) as bme:
+		with BME280(args.bus, args.address, oversampling=args.os, iir_filter=args.iir) as bme:
 			cid = bme.chip_id
 			print(f"Chip ID: 0x{cid:02X} (verwacht 0x60 voor BME280)")
 			if cid != 0x60:
@@ -76,10 +83,17 @@ def main() -> int:
 					print(f"  [{i+1}/{args.samples}]  {p_hpa:.2f} hPa  {t_c:.2f} °C  {rh:.1f} %RH")
 			dt = time.perf_counter() - t0
 			rate = args.samples / dt if dt > 0 else 0.0
+			# Vuistregel ISA rond zeeniveau: 1 hPa ≈ 8,3 m.
+			p_std = statistics.pstdev(pressures) if len(pressures) >= 2 else 0.0
+			p_ptp = max(pressures) - min(pressures) if pressures else 0.0
 			print(
 				f"Klaar: {args.samples} samples in {dt:.3f} s → {rate:.1f} Hz  |  "
 				f"p min/max {min(pressures):.2f} / {max(pressures):.2f} hPa  "
-				f"stdev {statistics.pstdev(pressures):.3f} hPa"
+				f"stdev {p_std:.3f} hPa  P2P {p_ptp:.3f} hPa"
+			)
+			print(
+				f"  ≈ hoogte-ruis: stdev {p_std * 8.3:.2f} m  P2P {p_ptp * 8.3:.2f} m  "
+				f"(os={args.os} iir={args.iir})"
 			)
 	except OSError as e:
 		print(f"I²C-fout: {e}", file=sys.stderr)

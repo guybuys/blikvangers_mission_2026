@@ -12,12 +12,15 @@ os.makedirs(PHOTO_DIR, exist_ok=True)
 
 CAPTURE_INTERVAL = float(os.environ.get("CAPTURE_INTERVAL", "0"))
 
-MQTT_BROKER = "mqtt.2-wire.xyz"
-MQTT_PORT = 1883
-MQTT_USER = "cansat"
-MQTT_PASS = "C2N$@T6tw"
-CONTROL_TOPIC = "rpi/camera/control"
-STATUS_TOPIC = "rpi/camera/status"
+# MQTT-creds uit de omgeving (.env). Zie docs/secrets.md. Script faalt hier
+# bewust met KeyError als de waarden niet gezet zijn — beter een duidelijke
+# crash dan stilletjes met niets connecten.
+MQTT_BROKER = os.environ["CANSAT_MQTT_BROKER"]
+MQTT_PORT = int(os.environ.get("CANSAT_MQTT_PORT", "1883"))
+MQTT_USER = os.environ["CANSAT_MQTT_USER"]
+MQTT_PASS = os.environ["CANSAT_MQTT_PASS"]
+CONTROL_TOPIC = os.environ.get("CANSAT_MQTT_CONTROL_TOPIC", "rpi/camera/control")
+STATUS_TOPIC = os.environ.get("CANSAT_MQTT_STATUS_TOPIC", "rpi/camera/status")
 
 # Globale vlaggen
 running = False           # of de foto-loop actief is

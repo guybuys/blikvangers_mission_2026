@@ -23,6 +23,8 @@ Uitgebreidere notities en hardware-informatie. De **projectintro en installatie*
   Twee lagen (Pico `CONFIG` / `MISSION` vs Zero-substates `PAD_IDLE`, `ASCENT`, `DEPLOYED`, `LANDED`), Nederlandse uitleg bij de Engelse namen, overgangen, frequentie persistentie, WiFi-kanttekening, link met `wire_protocol.py`.
 - **[Mission triggers — drempelwaarden voor de overgangen](mission_triggers.md)**  
   Wat detecteert `ASCENT` / `DEPLOY` / `LAND` precies, welke sensor, wat zijn zinvolle waarden en hoe stel je ze in vanaf de Pico (`SET TRIGGER …`, `GET TRIGGERS`, `PREFLIGHT`).
+- **[Geheimen & lokale configuratie](secrets.md)**  
+  `.env` op de Zero, `secrets.py` op de Pico, `.env.example` / `secrets.example.py` als template. Wat is écht geheim en hoe hou je Pico en Zero op dezelfde AES-sleutel.
 
 ## Later uit te breiden
 

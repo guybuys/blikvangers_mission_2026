@@ -16,7 +16,7 @@ os.makedirs(PROCESSED_DIR, exist_ok=True)
 PROCESS_EVERY_N = int(os.environ.get("PROCESS_EVERY_N", "5"))
 _photo_counter = 0
 
-mqtt = MqttHandler(broker="mqtt.2-wire.xyz", port=1883)  # pas aan!
+mqtt = MqttHandler()  # broker/creds uit .env (CANSAT_MQTT_*; zie docs/secrets.md)
 
 options = apriltag.DetectorOptions(
     families="tag36h11",

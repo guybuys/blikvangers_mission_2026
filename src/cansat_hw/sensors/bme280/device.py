@@ -21,6 +21,9 @@ BME280_OSAMPLE_4 = 3
 BME280_OSAMPLE_8 = 4
 BME280_OSAMPLE_16 = 5
 
+# IIR-filter coëfficient (register 0xF5, bits 4:2). 0 = uit; 2/4/8/16 zijn geldig.
+_IIR_FILTER_CODES = {0: 0, 2: 1, 4: 2, 8: 3, 16: 4}
+
 
 def _conversion_sleep_us(oversampling: int) -> float:
 	"""Minimale wachttijd na forced-measure trigger (Pico-formule, microseconden)."""
@@ -41,6 +44,7 @@ class BME280:
 		address: int = 0x76,
 		*,
 		oversampling: int = BME280_OSAMPLE_1,
+		iir_filter: int = 0,
 	) -> None:
 		try:
 			from smbus2 import SMBus
@@ -50,14 +54,32 @@ class BME280:
 			) from e
 		if oversampling not in (1, 2, 3, 4, 5):
 			raise ValueError("oversampling must be 1..5")
+		if iir_filter not in _IIR_FILTER_CODES:
+			raise ValueError("iir_filter must be one of 0, 2, 4, 8, 16")
 		self._address = address
 		self._oversampling = oversampling
+		self._iir_filter = iir_filter
 		self._bus: Any = SMBus(bus)
 		self._sleep_s = _conversion_sleep_us(oversampling)
 		self.t_fine = 0
 		self._load_calibration()
+		# Schrijf config (0xF5) met filter-bits [4:2]; t_sb/spi3w blijven 0 (forced mode).
+		filter_code = _IIR_FILTER_CODES[iir_filter]
+		self._bus.write_byte_data(
+			self._address, BME280_REGISTER_CONFIG, (filter_code & 0x07) << 2
+		)
 		# Zelfde init-write als Pico (control vóór eerste meting)
 		self._bus.write_byte_data(self._address, BME280_REGISTER_CONTROL, 0x3F)
+		# Als de IIR-filter aanstaat, heeft hij 2*coef samples nodig om te stabiliseren
+		# (datasheet §3.4.4). We doen hier een paar "warm-up" forced measures zodat
+		# de eerste echte ``read()`` al uit een gevuld filter komt.
+		if iir_filter > 0:
+			warmup = min(2 * iir_filter, 40)
+			for _ in range(warmup):
+				try:
+					self._read_raw_adc()
+				except Exception:  # noqa: BLE001
+					break
 
 	def close(self) -> None:
 		b = getattr(self, "_bus", None)

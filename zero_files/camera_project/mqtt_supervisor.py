@@ -5,10 +5,10 @@ import socket
 import threading
 import paho.mqtt.client as mqtt
 
-MQTT_BROKER = os.environ.get("MQTT_BROKER", "mqtt.2-wire.xyz")
-MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
-MQTT_USER = os.environ.get("MQTT_USER", "cansat")
-MQTT_PASS = os.environ.get("MQTT_PASS", "C2N$@T6tw")
+MQTT_BROKER = os.environ["CANSAT_MQTT_BROKER"]
+MQTT_PORT = int(os.environ.get("CANSAT_MQTT_PORT", "1883"))
+MQTT_USER = os.environ["CANSAT_MQTT_USER"]
+MQTT_PASS = os.environ["CANSAT_MQTT_PASS"]
 
 PING_TOPIC = os.environ.get("PING_TOPIC", "rpi/camera/ping")
 PONG_TOPIC = os.environ.get("PONG_TOPIC", "rpi/camera/pong")

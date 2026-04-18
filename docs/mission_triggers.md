@@ -34,6 +34,17 @@ Alle waarden vind je ook in `PREFLIGHT`-OK: `OK PRE ALL GND=1019.1 ASC=5.0m DEP=
 - **Zelf instellen:** `SET TRIGGER ASCENT 5` → antwoord `OK TRIG ASCENT 5.00m`.
 - **Hoe checken zonder vlucht?** In CONFIG kan je `BME280` herhaaldelijk opvragen of `scripts/bme280_test.py --samples 50` draaien; het verschil tussen samples toont je de ruis en geeft een realistische ondergrens voor `ASC`.
 
+### BME280-ruis onder controle
+
+De radio-service start de BME280 standaard met **oversampling ×16 + IIR-filter ×16**. Met die instellingen zegt de datasheet ~0,3 Pa RMS, wat neerkomt op **σ ≈ 2 cm** per sample. Dat is ruim voldoende voor een 3 m DEPLOY-drempel.
+
+- Wil je zien hoe ruis evolueert, gebruik `scripts/bme280_test.py`:
+  - `python scripts/bme280_test.py --samples 200 --interval 0 --os 1 --iir 0` (ruw — ~0,1 hPa P2P ≈ 0,8 m)
+  - `python scripts/bme280_test.py --samples 200 --interval 0 --os 5 --iir 16` (stil — ~0,01 hPa P2P ≈ 8 cm)
+  - Het script print nu ook "hoogte-ruis" in meters naast hPa.
+- De service gebruikt vaste argumenten `--bme280-os 16 --bme280-iir 16` (aanbevolen voor vlucht). Overrides mogelijk via de unit of handmatig starten met andere waarden.
+- **`CAL GROUND`** middelt 16 samples bovenop de filter/oversampling → **σ ≈ 0,25 cm** op de grondreferentie. Dus kalibratie in CONFIG is voortaan erg stabiel.
+
 > **Waarom in meters, niet hPa?** Meters zijn voor iedereen intuïtief ("5 m hoog"); de omzetting naar hPa hangt af van het actuele weer. Door intern pas bij preflight/detectie om te rekenen naar hPa **met de huidige `ground_hpa`**, klopt de drempel ongeacht of het vandaag 1013 of 1020 hPa is.
 
 ---

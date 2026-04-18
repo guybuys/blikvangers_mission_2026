@@ -3,11 +3,19 @@ import json
 import time
 
 class MqttHandler:
-    def __init__(self, broker="mqtt.2-wire.xyz", port=1883, username="cansat", password="C2N$@T6tw"):
+    def __init__(self, broker=None, port=1883, username=None, password=None):
+        # Credentials NIET meer hardcoded; lees ze uit de omgeving (.env) als
+        # ze niet expliciet zijn doorgegeven. Zie docs/secrets.md.
+        import os as _os
+        broker = broker or _os.environ["CANSAT_MQTT_BROKER"]
+        port = int(_os.environ.get("CANSAT_MQTT_PORT", str(port)))
+        username = username or _os.environ.get("CANSAT_MQTT_USER")
+        password = password or _os.environ.get("CANSAT_MQTT_PASS")
+
         self.client = mqtt.Client()
         self.client.on_connect = self.on_connect
         self.client.on_disconnect = self.on_disconnect
-        
+
         if username and password:
             self.client.username_pw_set(username, password)
         

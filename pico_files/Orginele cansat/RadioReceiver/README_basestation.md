@@ -62,6 +62,37 @@ Op de **CanSat (Zero 2 W)** draait `cansat_radio_protocol.py` **zonder** toetsen
 | `!apogee` | Stuurt `GET APOGEE` — hoogste hoogte tot nu toe, bijhorende druk en ouderdom in s |
 | `!resetapogee` | Stuurt `RESET APOGEE` — apogee-tracking herbeginnen (alleen CONFIG) |
 | `!listen` | Alleen RX-loop (tot Stop in Thonny) |
+| `!log on [pad]` | Start JSON-lines log op de Pico-flash (default `cansat_<timestamp>.jsonl`) |
+| `!log off` | Sluit de actieve log af |
+| `!log status` | Toont of er gelogd wordt + pad + laatst gekende MISSION-mode |
+
+### Log-formaat
+
+Elke TX, RX en TIMEOUT wordt bewaard als één JSON-record per regel (**JSONL**):
+
+```json
+{"dt_ms": 0,    "dir": "INFO", "text": "LOG_OPEN", "version": 1, "node": 100, "dest": 120, "freq_mhz": 433.0}
+{"dt_ms": 42,   "dir": "TX",   "text": "CAL GROUND"}
+{"dt_ms": 520,  "dir": "RX",   "text": "OK GROUND 1019.19", "rssi": -28.0, "parsed": {"kind": "GROUND", "ground_hpa": 1019.19}}
+{"dt_ms": 1200, "dir": "TX",   "text": "GET ALT"}
+{"dt_ms": 1684, "dir": "RX",   "text": "OK ALT -0.29 1019.23", "rssi": -27.5, "parsed": {"kind": "ALT", "alt_m": -0.29, "pressure_hpa": 1019.23}, "mode": "MISSION"}
+```
+
+- `dt_ms` is altijd aanwezig: monotone milliseconden sinds `!log on`. Betrouwbaar ook zonder RTC.
+- `t` (ISO-tijd) komt erbij zodra de Pico-RTC plausibel gezet is (jaar ≥ 2020), bv. na `SET TIME` + Thonny-sync.
+- `parsed` ontleedt bekende `OK`-replies naar kolom-vriendelijke velden (`alt_m`, `pressure_hpa`, `temp_c`, `humidity_pct`, `ground_hpa`, `freq_mhz`, `epoch`, …) — zo is MISSION-telemetrie direct in `pandas` of een dashboard te gooien.
+- `mode` toont de laatst ontvangen `OK MODE …` zodat je CONFIG- en MISSION-secties makkelijk kunt filteren.
+
+Analyseren later (op de laptop):
+
+```python
+import pandas as pd
+df = pd.read_json("cansat_20260418_123456.jsonl", lines=True)
+mission = df[df["mode"] == "MISSION"]
+alt = pd.json_normalize(mission["parsed"])
+```
+
+**Let op Pico-flash:** een log-bestand van ~200 KB (≈ een uur vliegen met `!alt` elke seconde) past prima; elke write `flush()`t direct, zodat je bij een reset geen regels verliest. Schakel `!log off` aan het eind van een sessie zodat de file netjes wordt gesloten. Voor lange sessies: regelmatig nieuwe file (`!log off` + `!log on`) — blokken van ~1 MB blijven handelbaar.
 
 ## Draad-protocol (naar CanSat over RFM69)
 
@@ -123,6 +154,12 @@ Zie in de repo **`deploy/systemd/cansat-radio-protocol.service`**: pas `WorkingD
 ## Radio-instellingen
 
 Moeten **exact** matchen: **AES-key 16 bytes**, **zelfde MHz**, **node 100** (base station) ↔ **120** (CanSat), zoals in `rfm69test_emitter.py` / `radio_rfm69_test.py`.
+
+**Sleutel niet in git**: leg je eigen `RADIO_KEY` in `secrets.py` naast dit bestand
+(template: `secrets.example.py`). Op de Zero: `CANSAT_RADIO_KEY` in `.env` aan de
+repo-root (template: `.env.example`). Zonder eigen key draaien beide kanten met
+de publiek bekende demo-sleutel en zie je een `WARN`. Zie
+[`docs/secrets.md`](../../../docs/secrets.md).
 
 ## Troubleshooting: Pico ziet geen antwoord, Zero wel `RX` / `TX` in `--verbose`
 

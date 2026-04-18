@@ -39,6 +39,36 @@ if _SRC.is_dir() and str(_SRC) not in sys.path:
 _DEFAULT_RUNTIME_PATH = _ROOT / "config" / "radio_runtime.json"
 
 
+def _load_dotenv(path: Path) -> None:
+	"""Mini-loader voor ``.env`` — zet variabelen in ``os.environ`` tenzij al gezet.
+
+	Formaat: ``KEY=VALUE`` per regel, ``#`` voor commentaar, enkele/dubbele quotes
+	rond de waarde mogen (worden gestript). Geen shell-expansie. We blijven
+	bewust dep-vrij; voor een 'echte' parser: ``python-dotenv``.
+	"""
+	if not path.is_file():
+		return
+	try:
+		text = path.read_text(encoding="utf-8")
+	except OSError:
+		return
+	for raw in text.splitlines():
+		line = raw.strip()
+		if not line or line.startswith("#"):
+			continue
+		if "=" not in line:
+			continue
+		key, _, value = line.partition("=")
+		key = key.strip()
+		value = value.strip()
+		if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+			value = value[1:-1]
+		os.environ.setdefault(key, value)
+
+
+_load_dotenv(_ROOT / ".env")
+
+
 def _load_persisted_freq(path: Path) -> Optional[float]:
 	try:
 		data = json.loads(path.read_text(encoding="utf-8"))
@@ -62,11 +92,35 @@ def _save_persisted_freq(path: Path, mhz: float) -> Optional[str]:
 
 
 def main() -> int:
-	p = argparse.ArgumentParser(description="CanSat (Zero 2 W) RFM69 wire-protocol loop")
-	p.add_argument("--freq", type=float, default=433.0, help="MHz")
-	p.add_argument("--node", type=int, default=120, help="Dit toestel (CanSat) RadioHead-adres")
-	p.add_argument("--dest", type=int, default=100, help="Standaard bestemming (basis); replies gaan naar afzender")
-	p.add_argument("--key", type=str, default="CANSAT_2025-2026", help="16-byte UTF-8 AES")
+	p = argparse.ArgumentParser(
+		description="CanSat (Zero 2 W) RFM69 wire-protocol loop. "
+		"Defaults kunnen via .env (CANSAT_RADIO_KEY/NODE/DEST/FREQ_MHZ) overschreven worden; "
+		"CLI-args winnen altijd.",
+	)
+	p.add_argument(
+		"--freq",
+		type=float,
+		default=float(os.environ.get("CANSAT_RADIO_FREQ_MHZ", "433.0")),
+		help="MHz (default: $CANSAT_RADIO_FREQ_MHZ of 433.0; wordt overruled door persisted freq in --runtime-path)",
+	)
+	p.add_argument(
+		"--node",
+		type=int,
+		default=int(os.environ.get("CANSAT_RADIO_NODE", "120")),
+		help="Dit toestel (CanSat) RadioHead-adres (default: $CANSAT_RADIO_NODE of 120)",
+	)
+	p.add_argument(
+		"--dest",
+		type=int,
+		default=int(os.environ.get("CANSAT_RADIO_DEST", "100")),
+		help="Standaard bestemming (basis); replies gaan naar afzender (default: $CANSAT_RADIO_DEST of 100)",
+	)
+	p.add_argument(
+		"--key",
+		type=str,
+		default=os.environ.get("CANSAT_RADIO_KEY", "CANSAT_2025-2026"),
+		help="16-byte UTF-8 AES (default: $CANSAT_RADIO_KEY uit .env of demo-key)",
+	)
 	p.add_argument("--reset-pin", type=int, default=25)
 	p.add_argument(
 		"--dio0-pin",
@@ -94,6 +148,20 @@ def main() -> int:
 		type=lambda x: int(x, 0),
 		default=0x76,
 		help="BME280 I²C-adres (0x76 of 0x77)",
+	)
+	p.add_argument(
+		"--bme280-os",
+		type=int,
+		default=16,
+		choices=[1, 2, 4, 8, 16],
+		help="BME280 oversampling (1/2/4/8/16); hogere waarden = minder ruis (±0.2 Pa bij x16). Default 16 voor vluchtgebruik.",
+	)
+	p.add_argument(
+		"--bme280-iir",
+		type=int,
+		default=16,
+		choices=[0, 2, 4, 8, 16],
+		help="BME280 IIR-filter coëfficient (0=uit, 2/4/8/16); default 16 dempt hoogfrequente ruis tot ~0.3 Pa RMS (~2 cm).",
 	)
 	p.add_argument(
 		"--no-bme280",
@@ -138,6 +206,12 @@ def main() -> int:
 	if len(key) != 16:
 		print("--key must be exactly 16 UTF-8 bytes", file=sys.stderr)
 		return 1
+	if args.key == "CANSAT_2025-2026" and not os.environ.get("CANSAT_RADIO_KEY"):
+		print(
+			"WARN: RFM69 draait met de publieke demo-key. Zet CANSAT_RADIO_KEY in .env "
+			"(zie .env.example) voor een privé-sleutel.",
+			file=sys.stderr,
+		)
 
 	spi_dev = Path(f"/dev/spidev{args.spi_bus}.{args.spi_device}")
 	if not spi_dev.exists():
@@ -150,7 +224,14 @@ def main() -> int:
 		try:
 			from cansat_hw.sensors.bme280 import BME280
 
-			bme280 = BME280(args.i2c_bus, args.bme280_addr)
+			# Map OSP 1/2/4/8/16 naar Pico-OSAMPLE-codes 1..5.
+			_OS_TO_CODE = {1: 1, 2: 2, 4: 3, 8: 4, 16: 5}
+			bme280 = BME280(
+				args.i2c_bus,
+				args.bme280_addr,
+				oversampling=_OS_TO_CODE[args.bme280_os],
+				iir_filter=args.bme280_iir,
+			)
 			if bme280.chip_id != 0x60:
 				print(
 					f"WARN: BME280 chip id 0x{bme280.chip_id:02X} (verwacht 0x60) — READ BME280 uit",

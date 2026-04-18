@@ -15,10 +15,10 @@ import paho.mqtt.client as mqtt
 PHOTO_DIR = os.environ.get("PHOTO_DIR", "/home/icw/photos")
 os.makedirs(PHOTO_DIR, exist_ok=True)
 
-MQTT_BROKER = os.environ.get("MQTT_BROKER", "mqtt.2-wire.xyz")
-MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
-MQTT_USER = os.environ.get("MQTT_USER", "cansat")
-MQTT_PASS = os.environ.get("MQTT_PASS", "C2N$@T6tw")
+MQTT_BROKER = os.environ["CANSAT_MQTT_BROKER"]
+MQTT_PORT = int(os.environ.get("CANSAT_MQTT_PORT", "1883"))
+MQTT_USER = os.environ["CANSAT_MQTT_USER"]
+MQTT_PASS = os.environ["CANSAT_MQTT_PASS"]
 
 CONTROL_TOPIC = os.environ.get("CONTROL_TOPIC", "rpi/camera/control")
 STATUS_TOPIC = os.environ.get("STATUS_TOPIC", "rpi/camera/status")
