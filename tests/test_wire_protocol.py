@@ -591,12 +591,37 @@ class TestModeTickTest(unittest.TestCase):
 		self.assertFalse(send_tlm)
 		self.assertTrue(end_test)
 
-	def test_tick_inactive_outside_test_mode(self) -> None:
+	def test_tick_inactive_in_config(self) -> None:
 		from cansat_hw.radio.wire_protocol import RadioRuntimeState, test_mode_tick
 
 		st = RadioRuntimeState(mode="CONFIG")
 		send_tlm, end_test = test_mode_tick(st, now_monotonic=1e9)
 		self.assertFalse(send_tlm)
+		self.assertFalse(end_test)
+
+	def test_tick_sends_tlm_in_mission_when_interval_elapsed(self) -> None:
+		"""Mini-fase 7: MISSION moet net als TEST autonoom TLM pushen.
+
+		Het verschil met TEST is dat er **geen deadline** is — MISSION blijft
+		tikken tot een expliciete ``SET MODE CONFIG``.
+		"""
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, test_mode_tick
+
+		st = RadioRuntimeState(mode="MISSION")
+		st.test_next_tlm_monotonic = 50.0
+		send_tlm, end_test = test_mode_tick(st, now_monotonic=50.1)
+		self.assertTrue(send_tlm)
+		self.assertFalse(end_test)
+
+	def test_tick_in_mission_never_signals_end(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, test_mode_tick
+
+		st = RadioRuntimeState(mode="MISSION")
+		# Zelfs een gezette deadline mag in MISSION niets afsluiten.
+		st.test_deadline_monotonic = 0.0
+		st.test_next_tlm_monotonic = 50.0
+		send_tlm, end_test = test_mode_tick(st, now_monotonic=1e6)
+		self.assertTrue(send_tlm)
 		self.assertFalse(end_test)
 
 	def test_advance_tlm_pushes_deadline_forward(self) -> None:
@@ -987,6 +1012,378 @@ class IirFilterTest(unittest.TestCase):
 		bme.set_iir_filter.side_effect = OSError("bus busy")
 		st = RadioRuntimeState(mode="TEST", mission_iir=16)
 		self.assertIsNone(apply_mode_iir(st, bme))
+
+
+class FlightStateMachineTest(unittest.TestCase):
+	"""Pure state-machine logica (`evaluate_flight_state` / `maybe_advance_flight_state`)."""
+
+	def _mission_state(self) -> "object":
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState
+
+		st = RadioRuntimeState(mode="MISSION")
+		st.ground_hpa = 1013.2
+		# Defaults: ASC=5m DEP=3m LND=5m. flight_state komt via __post_init__
+		# automatisch op PAD_IDLE.
+		return st
+
+	def test_post_init_syncs_mission_to_pad_idle(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState
+		from cansat_hw.telemetry.codec import STATE_PAD_IDLE
+
+		st = RadioRuntimeState(mode="MISSION")
+		self.assertEqual(st.flight_state, STATE_PAD_IDLE)
+
+	def test_post_init_syncs_test_to_deployed(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState
+		from cansat_hw.telemetry.codec import STATE_DEPLOYED
+
+		st = RadioRuntimeState(mode="TEST")
+		self.assertEqual(st.flight_state, STATE_DEPLOYED)
+
+	def test_post_init_keeps_explicit_flight_state(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState
+		from cansat_hw.telemetry.codec import STATE_ASCENT
+
+		st = RadioRuntimeState(mode="MISSION", flight_state=STATE_ASCENT)
+		self.assertEqual(st.flight_state, STATE_ASCENT)
+
+	def test_pad_idle_to_ascent_when_threshold_passed(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_ASCENT, STATE_PAD_IDLE
+
+		st = self._mission_state()
+		self.assertEqual(st.flight_state, STATE_PAD_IDLE)
+		# Net onder de drempel — geen transitie.
+		self.assertFalse(maybe_advance_flight_state(st, st.trig_ascent_height_m - 0.1))
+		self.assertEqual(st.flight_state, STATE_PAD_IDLE)
+		# Op de drempel — wel transitie.
+		self.assertTrue(maybe_advance_flight_state(st, st.trig_ascent_height_m))
+		self.assertEqual(st.flight_state, STATE_ASCENT)
+
+	def test_ascent_to_deployed_when_descent_from_apogee_passed(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_ASCENT, STATE_DEPLOYED
+
+		st = self._mission_state()
+		st.flight_state = STATE_ASCENT
+		st.max_alt_m = 100.0  # apogee
+		# Net niet ver genoeg gedaald (DEP=3m default) — geen transitie.
+		self.assertFalse(
+			maybe_advance_flight_state(st, 100.0 - st.trig_deploy_descent_m + 0.1)
+		)
+		self.assertEqual(st.flight_state, STATE_ASCENT)
+		# Voorbij de drempel — wel transitie.
+		self.assertTrue(
+			maybe_advance_flight_state(st, 100.0 - st.trig_deploy_descent_m)
+		)
+		self.assertEqual(st.flight_state, STATE_DEPLOYED)
+
+	def test_ascent_to_deployed_needs_apogee_to_be_set(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_ASCENT
+
+		st = self._mission_state()
+		st.flight_state = STATE_ASCENT
+		st.max_alt_m = None
+		# Zonder apogee mag DEPLOYED nooit triggeren.
+		self.assertFalse(maybe_advance_flight_state(st, -50.0))
+		self.assertEqual(st.flight_state, STATE_ASCENT)
+
+	def test_deployed_to_landed_when_back_near_ground(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_DEPLOYED, STATE_LANDED
+
+		st = self._mission_state()
+		st.flight_state = STATE_DEPLOYED
+		# Boven LND-drempel: nog niet geland.
+		self.assertFalse(maybe_advance_flight_state(st, st.trig_land_hz_m + 0.1))
+		self.assertEqual(st.flight_state, STATE_DEPLOYED)
+		# Op de drempel: geland.
+		self.assertTrue(maybe_advance_flight_state(st, st.trig_land_hz_m))
+		self.assertEqual(st.flight_state, STATE_LANDED)
+
+	def test_landed_does_not_roll_back(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_LANDED
+
+		st = self._mission_state()
+		st.flight_state = STATE_LANDED
+		# Zelfs een sterke "stijging" mag niet rollback'en (windvlaag op grond).
+		self.assertFalse(maybe_advance_flight_state(st, 200.0))
+		self.assertEqual(st.flight_state, STATE_LANDED)
+
+	def test_state_machine_inactive_outside_mission(self) -> None:
+		from cansat_hw.radio.wire_protocol import (
+			RadioRuntimeState,
+			maybe_advance_flight_state,
+		)
+		from cansat_hw.telemetry.codec import STATE_DEPLOYED
+
+		# TEST: flight_state staat hardcoded op DEPLOYED en mag niet bewegen.
+		st = RadioRuntimeState(mode="TEST")
+		st.ground_hpa = 1013.2
+		st.max_alt_m = 100.0
+		self.assertFalse(maybe_advance_flight_state(st, 0.0))
+		self.assertEqual(st.flight_state, STATE_DEPLOYED)
+
+	def test_get_alt_in_mission_advances_state(self) -> None:
+		from cansat_hw.radio.wire_protocol import handle_wire_line
+		from cansat_hw.telemetry.codec import STATE_ASCENT, STATE_PAD_IDLE
+
+		rfm = MagicMock()
+		st = self._mission_state()
+		st.trig_ascent_height_m = 5.0
+		# Druk geeft ~70 m boven grond -> moet ASCENT triggeren via GET ALT.
+		bme = _fake_bme(p_hpa=1005.0)
+		self.assertEqual(st.flight_state, STATE_PAD_IDLE)
+		out = handle_wire_line(rfm, st, "GET ALT", bme280=bme)
+		self.assertTrue(out.startswith(b"OK ALT "))
+		self.assertEqual(st.flight_state, STATE_ASCENT)
+
+	def test_set_mode_mission_initialises_pad_idle(self) -> None:
+		from cansat_hw.radio.wire_protocol import handle_wire_line
+		from cansat_hw.telemetry.codec import STATE_PAD_IDLE
+
+		rfm = MagicMock()
+		rfm.frequency_mhz = 434.0
+		st = _valid_state()
+		# Stel een willekeurige flight_state vooraf in om te zien dat MISSION
+		# 'm reset.
+		from cansat_hw.telemetry.codec import STATE_LANDED
+
+		st.flight_state = STATE_LANDED
+		out = handle_wire_line(
+			rfm, st, "SET MODE MISSION", bme280=_fake_bme(), bno055=_fake_bno()
+		)
+		self.assertEqual(out, b"OK MODE MISSION")
+		self.assertEqual(st.flight_state, STATE_PAD_IDLE)
+
+	def test_set_mode_config_resets_to_none(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+		from cansat_hw.telemetry.codec import STATE_ASCENT, STATE_NONE
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="CONFIG", flight_state=STATE_ASCENT)
+		out = handle_wire_line(rfm, st, "SET MODE CONFIG")
+		self.assertEqual(out, b"OK MODE CONFIG")
+		self.assertEqual(st.flight_state, STATE_NONE)
+
+	def test_test_mode_end_resets_flight_state(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, test_mode_end
+		from cansat_hw.telemetry.codec import STATE_NONE
+
+		st = RadioRuntimeState(mode="TEST")
+		test_mode_end(st)
+		self.assertEqual(st.flight_state, STATE_NONE)
+
+
+class StateWireCommandsTest(unittest.TestCase):
+	def test_get_state_default_is_none_in_config(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "GET STATE")
+		self.assertEqual(out, b"OK STATE NONE")
+
+	def test_get_state_returns_current_flight_state(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+		from cansat_hw.telemetry.codec import STATE_ASCENT
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(flight_state=STATE_ASCENT)
+		out = handle_wire_line(rfm, st, "GET STATE")
+		self.assertEqual(out, b"OK STATE ASCENT")
+
+	def test_get_state_allowed_in_mission(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="MISSION")
+		out = handle_wire_line(rfm, st, "GET STATE")
+		self.assertEqual(out, b"OK STATE PAD_IDLE")
+
+	def test_get_state_allowed_in_test(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="TEST")
+		out = handle_wire_line(rfm, st, "GET STATE")
+		self.assertEqual(out, b"OK STATE DEPLOYED")
+
+	def test_set_state_in_config_updates(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+		from cansat_hw.telemetry.codec import STATE_DEPLOYED
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "SET STATE DEPLOYED")
+		self.assertEqual(out, b"OK STATE DEPLOYED")
+		self.assertEqual(st.flight_state, STATE_DEPLOYED)
+
+	def test_set_state_lowercase_accepted(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+		from cansat_hw.telemetry.codec import STATE_LANDED
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "SET STATE landed")
+		self.assertEqual(out, b"OK STATE LANDED")
+		self.assertEqual(st.flight_state, STATE_LANDED)
+
+	def test_set_state_rejects_unknown(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		self.assertEqual(handle_wire_line(rfm, st, "SET STATE BOOM"), b"ERR BAD STATE")
+		self.assertEqual(handle_wire_line(rfm, st, "SET STATE UNKNOWN"), b"ERR BAD STATE")
+
+	def test_set_state_blocked_in_mission(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="MISSION")
+		# MISSION-busy check vangt het al voor de inner CONFIG-only check.
+		self.assertEqual(
+			handle_wire_line(rfm, st, "SET STATE LANDED"), b"ERR BUSY MISSION"
+		)
+
+	def test_set_state_blocked_in_test(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState(mode="TEST")
+		self.assertEqual(
+			handle_wire_line(rfm, st, "SET STATE LANDED"), b"ERR BUSY TEST"
+		)
+
+
+class TlmFlightStateIntegrationTest(unittest.TestCase):
+	"""TLM-frames moeten de **dynamische** flight_state weergeven."""
+
+	def test_tlm_uses_dynamic_flight_state(self) -> None:
+		from cansat_hw.radio.wire_protocol import (
+			RadioRuntimeState,
+			build_telemetry_packet,
+		)
+		from cansat_hw.telemetry.codec import (
+			MODE_MISSION,
+			STATE_LANDED,
+			unpack_tlm,
+		)
+
+		st = RadioRuntimeState(mode="MISSION", flight_state=STATE_LANDED)
+		st.test_start_monotonic = 0.0
+		f = unpack_tlm(build_telemetry_packet(st, None, None))
+		self.assertEqual(f.mode, MODE_MISSION)
+		self.assertEqual(f.state, STATE_LANDED)
+
+	def test_tlm_in_test_keeps_deployed(self) -> None:
+		from cansat_hw.radio.wire_protocol import (
+			RadioRuntimeState,
+			build_telemetry_packet,
+		)
+		from cansat_hw.telemetry.codec import (
+			MODE_TEST,
+			STATE_DEPLOYED,
+			unpack_tlm,
+		)
+
+		st = RadioRuntimeState(mode="TEST")
+		st.test_start_monotonic = 0.0
+		f = unpack_tlm(build_telemetry_packet(st, None, None))
+		self.assertEqual(f.mode, MODE_TEST)
+		self.assertEqual(f.state, STATE_DEPLOYED)
+
+
+class MissionTlmLoopTest(unittest.TestCase):
+	"""Mini-fase 7: SET MODE MISSION moet de TLM-loop activeren en
+	SET MODE CONFIG moet 'm afsluiten + dest opruimen.
+
+	Bovendien moet ``build_telemetry_packet`` in MISSION de flight-state-
+	machine voeden, anders bewegen ASCENT/DEPLOYED/LANDED nooit zonder
+	expliciete ``GET ALT`` van de Pico.
+	"""
+
+	def _make_rfm(self) -> MagicMock:
+		rfm = MagicMock()
+		rfm.frequency_mhz = 434.0
+		return rfm
+
+	def test_set_mode_mission_activates_tlm_schedule(self) -> None:
+		from cansat_hw.radio.wire_protocol import handle_wire_line
+
+		st = _valid_state()
+		reply = handle_wire_line(
+			self._make_rfm(), st, "SET MODE MISSION",
+			bme280=_fake_bme(), bno055=_fake_bno(),
+		)
+		self.assertEqual(reply, b"OK MODE MISSION")
+		self.assertEqual(st.mode, "MISSION")
+		self.assertIsNotNone(st.test_next_tlm_monotonic)
+		# Geen TEST-deadline in MISSION.
+		self.assertIsNone(st.test_deadline_monotonic)
+		self.assertIsNone(st.test_duration_s)
+
+	def test_set_mode_config_clears_session_bookkeeping(self) -> None:
+		from cansat_hw.radio.wire_protocol import handle_wire_line
+
+		st = _valid_state()
+		handle_wire_line(
+			self._make_rfm(), st, "SET MODE MISSION",
+			bme280=_fake_bme(), bno055=_fake_bno(),
+		)
+		# Simuleer een gezet dest-node door de main-loop.
+		st.test_dest_node = 100
+		self.assertIsNotNone(st.test_next_tlm_monotonic)
+
+		reply = handle_wire_line(
+			self._make_rfm(), st, "SET MODE CONFIG", bme280=_fake_bme(),
+		)
+		self.assertEqual(reply, b"OK MODE CONFIG")
+		self.assertEqual(st.mode, "CONFIG")
+		self.assertIsNone(st.test_next_tlm_monotonic)
+		self.assertIsNone(st.test_dest_node)
+		self.assertIsNone(st.test_deadline_monotonic)
+		self.assertIsNone(st.test_duration_s)
+
+	def test_build_telemetry_in_mission_drives_state_machine(self) -> None:
+		"""Autonome TLM-loop moet PAD_IDLE → ASCENT triggeren als de
+		nieuwe BME-meting boven de drempel uitkomt — geen GET ALT nodig."""
+		from cansat_hw.radio.wire_protocol import (
+			RadioRuntimeState,
+			build_telemetry_packet,
+		)
+		from cansat_hw.telemetry.codec import STATE_ASCENT, STATE_PAD_IDLE
+
+		st = RadioRuntimeState(mode="MISSION")
+		st.ground_hpa = 1013.25
+		st.trig_ascent_height_m = 5.0
+		self.assertEqual(st.flight_state, STATE_PAD_IDLE)
+
+		# Nep-BME280 die ~10 m boven grond aangeeft (~1.2 hPa lager).
+		bme = MagicMock()
+		bme.read.return_value = (20.0, 1012.05, 50.0)
+
+		build_telemetry_packet(st, bme, None)
+		self.assertEqual(st.flight_state, STATE_ASCENT)
+
+	def test_build_telemetry_in_test_keeps_state_deployed(self) -> None:
+		"""TEST mag NIET door de state-machine bewogen worden, ook niet
+		al ligt de hoogte boven elke drempel."""
+		from cansat_hw.radio.wire_protocol import (
+			RadioRuntimeState,
+			build_telemetry_packet,
+		)
+		from cansat_hw.telemetry.codec import STATE_DEPLOYED
+
+		st = RadioRuntimeState(mode="TEST")
+		st.ground_hpa = 1013.25
+		bme = MagicMock()
+		bme.read.return_value = (20.0, 990.0, 50.0)  # ~190 m
+		build_telemetry_packet(st, bme, None)
+		self.assertEqual(st.flight_state, STATE_DEPLOYED)
 
 
 if __name__ == "__main__":

@@ -197,6 +197,13 @@ def _parse_reply(text):
 			"mode": parts[2],
 			"reason": " ".join(parts[3:]) if len(parts) >= 4 else "",
 		}
+	if parts[0] == "EVT" and len(parts) >= 3 and parts[1] == "STATE":
+		# Ongevraagde flight-state-overgang in MISSION (Fase 8). Bv.
+		# ``EVT STATE ASCENT`` of ``EVT STATE LANDED``.
+		return {
+			"kind": "EVT_STATE",
+			"state": parts[2],
+		}
 	if parts[0] != "OK" or len(parts) < 2:
 		return None
 	kind = parts[1]
@@ -212,6 +219,8 @@ def _parse_reply(text):
 		return _try_floats({"kind": "GROUND"}, (("ground_hpa", parts[2]),))
 	if kind == "MODE" and len(parts) >= 3:
 		return {"kind": "MODE", "mode": parts[2]}
+	if kind == "STATE" and len(parts) >= 3:
+		return {"kind": "STATE", "state": parts[2]}
 	if kind == "FREQ" and len(parts) >= 3:
 		return _try_floats({"kind": "FREQ"}, (("freq_mhz", parts[2]),))
 	if kind == "TIME" and len(parts) >= 3:
@@ -349,6 +358,8 @@ def _print_help_local():
 	print("  !alt           stuur GET ALT (hoogte in m boven grond + actuele druk)")
 	print("  !apogee        stuur GET APOGEE (hoogste hoogte sinds laatste reset + leeftijd)")
 	print("  !resetapogee   stuur RESET APOGEE (apogee-tracking opnieuw beginnen)")
+	print("  !state         stuur GET STATE (huidige flight state PAD_IDLE/ASCENT/DEPLOYED/LANDED)")
+	print("  !setstate NAME stuur SET STATE NAME — alleen in CONFIG; voor demo / pre-staging")
 	print("  !iir [N]       zonder N: GET IIR; met N (0/2/4/8/16): SET IIR N — lager = sneller, hoger = stiller")
 	print("  !altprime [N]  zonder N: GET ALT PRIME; met N (1..32): SET ALT PRIME N — meer = accuratere !alt, trager")
 	print("  !listen        alleen ontvangen (ACK aan) tot Ctrl+C — Thonny: stop knop")
@@ -423,6 +434,17 @@ def _handle_local(line: str) -> bool:
 		_send_and_wait_reply("GET APOGEE")
 	elif cmd == "!resetapogee":
 		_send_and_wait_reply("RESET APOGEE")
+	elif cmd == "!state":
+		_send_and_wait_reply("GET STATE")
+	elif cmd == "!setstate":
+		if len(parts) < 2:
+			print("ERR: !setstate <PAD_IDLE|ASCENT|DEPLOYED|LANDED|NONE>")
+			return True
+		name = parts[1].strip().upper()
+		if name not in ("PAD_IDLE", "ASCENT", "DEPLOYED", "LANDED", "NONE"):
+			print("ERR: !setstate <PAD_IDLE|ASCENT|DEPLOYED|LANDED|NONE>")
+			return True
+		_send_and_wait_reply("SET STATE %s" % name)
 	elif cmd == "!iir":
 		if len(parts) >= 2:
 			arg = parts[1].strip()
@@ -558,15 +580,14 @@ def _run_test_mode(seconds):
 	_log_emit("TX", wire)
 	if REPLY_GAP_S > 0:
 		time.sleep(REPLY_GAP_S)
-	pkt = rfm.receive(timeout=REPLY_TIMEOUT_S, with_ack=False, keep_listening=True)
-	if pkt is None:
+	# Zelfde filtering als bij gewone commando's: TLM/EVT mogen het echte
+	# ``OK MODE TEST <s>`` antwoord niet overstemmen.
+	reply_text, parsed = _recv_reply_filtering_telemetry(wire)
+	if reply_text is None and parsed is None:
 		print("(geen antwoord binnen %.1f s)" % REPLY_TIMEOUT_S)
 		_log_emit("TIMEOUT", wire, extra={"timeout_s": REPLY_TIMEOUT_S})
 		return
-	reply_text, parsed = _decode_packet(pkt)
-	print("RX <-", pkt)
-	if reply_text:
-		print("    ASCII:", reply_text)
+	print("RX <-", reply_text if reply_text else "(undecodable)")
 	print("    RSSI:", rfm.last_rssi)
 	_update_mode_from_parsed(parsed)
 	_log_emit("RX", reply_text or "", rssi=rfm.last_rssi, parsed=parsed)
@@ -625,6 +646,60 @@ def _run_test_mode(seconds):
 	)
 
 
+def _is_passthrough_packet(parsed):
+	"""True voor pakketten die GEEN antwoord op een commando zijn.
+
+	Bij MISSION/TEST pusht de Zero elke seconde een binary TLM-frame en
+	stuurt hij ongevraagd ``EVT STATE …`` / ``EVT MODE …`` bij een transitie.
+	Die mogen een command-reply (``OK STATE`` / ``OK MODE …`` / ``OK STOP RADIO``)
+	NIET overstemmen — anders zien we het echte antwoord nooit en denkt
+	de operator dat zijn commando faalde (terwijl het wél is uitgevoerd).
+	"""
+	if not parsed:
+		return False
+	kind = parsed.get("kind")
+	return kind == "TLM" or (isinstance(kind, str) and kind.startswith("EVT_"))
+
+
+def _recv_reply_filtering_telemetry(wire_line, log_extra_pass=None):
+	"""Wacht tot een echte text-reply binnenkomt; passeer TLM/EVT pakketten.
+
+	Retourneert ``(reply_text, parsed)`` of ``(None, None)`` bij timeout.
+	Onderweg printen + loggen we elk passing-through pakket zodat de
+	operator nog steeds telemetrie/EVT-overgangen ziet binnenstromen.
+	De totale wachttijd is de gewone ``REPLY_TIMEOUT_S``; per pass-through
+	pakket telt de tijd die verstreek mee, zodat we niet eindeloos blijven
+	hangen als de Zero alleen maar TLM-frames staat te pompen.
+	"""
+	deadline_ms = time.ticks_add(time.ticks_ms(), int(REPLY_TIMEOUT_S * 1000))
+	while True:
+		remaining_ms = time.ticks_diff(deadline_ms, time.ticks_ms())
+		if remaining_ms <= 0:
+			return None, None
+		# Korte chunks (max 0.5 s) zodat we tussen pakketten responsief
+		# blijven en de remaining-budget netjes afpellen.
+		chunk_s = min(0.5, remaining_ms / 1000.0)
+		pkt = rfm.receive(timeout=chunk_s, with_ack=False, keep_listening=True)
+		if pkt is None:
+			continue
+		text, parsed = _decode_packet(pkt)
+		if _is_passthrough_packet(parsed):
+			# Pass-through: laten zien, loggen, doorgaan met wachten.
+			label = "TLM" if (parsed and parsed.get("kind") == "TLM") else "EVT"
+			print("  (pass-through %s tijdens wachten op reply: %s)" % (label, text))
+			_update_mode_from_parsed(parsed)
+			_log_emit(
+				"RX",
+				text or "",
+				rssi=rfm.last_rssi,
+				parsed=parsed,
+				extra=log_extra_pass,
+			)
+			continue
+		# Echte reply (OK …, ERR …, of onbekend tekstpakket) — terugsturen.
+		return text, parsed
+
+
 def _send_and_wait_reply(wire_line: str):
 	"""Stuurt één pakket naar ``rfm.destination`` en wacht kort op een antwoordpakket."""
 	payload = validate_wire_line(wire_line).encode("utf-8")
@@ -644,21 +719,18 @@ def _send_and_wait_reply(wire_line: str):
 	# Geen clear_fifo() hier: die doet STDBY→RX en wist de RX-FIFO. Een snel
 	# antwoord van de CanSat kan tijdens REPLY_GAP al binnenkomen — dan zou je
 	# het met clear_fifo() weggooien vóór receive().
-	pkt = rfm.receive(timeout=REPLY_TIMEOUT_S, with_ack=False, keep_listening=True)
-	if pkt is None:
+	reply_text, parsed = _recv_reply_filtering_telemetry(wire_line)
+	if reply_text is None and parsed is None:
 		print("(geen antwoord binnen %.1f s)" % REPLY_TIMEOUT_S)
 		print("  Tip: start op de CanSat (Zero 2 W) eerst: python scripts/cansat_radio_protocol.py")
 		print("  Probeer: !timeout 5   en/of   !gap 0.1   — zelfde freq/key als CanSat (!info)")
 		_log_emit("TIMEOUT", wire_line, extra={"timeout_s": REPLY_TIMEOUT_S})
 		return
-	print("RX <-", pkt)
-	reply_text, parsed = _decode_packet(pkt)
-	if reply_text:
-		print("    ASCII:", reply_text)
+	print("RX <-", reply_text if reply_text else "(undecodable)")
 	print("    RSSI:", rfm.last_rssi)
 	_update_mode_from_parsed(parsed)
 	_log_emit("RX", reply_text or "", rssi=rfm.last_rssi, parsed=parsed)
-	if reply_text and not (parsed and parsed.get("kind") == "TLM"):
+	if reply_text:
 		_post_process_reply(wire_line, reply_text)
 
 

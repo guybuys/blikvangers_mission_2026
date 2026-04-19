@@ -228,7 +228,19 @@ def main() -> int:
 		action="store_true",
 		help="Schakel binary logging uit (alleen radio-TX, geen .bin op de SD-kaart).",
 	)
+	p.add_argument(
+		"--mission-tlm-interval",
+		type=float,
+		default=1.0,
+		metavar="S",
+		help="Periode (s) van de autonome TLM-loop in MISSION mode. Lager = meer frames "
+		"(state-machine reageert sneller op hoogte-veranderingen, ook zonder bevel van "
+		"de Pico); te laag verzadigt de radio. Default 1.0 s.",
+	)
 	args = p.parse_args()
+	if args.mission_tlm_interval < 0.1:
+		print("--mission-tlm-interval moet >= 0.1 s zijn", file=sys.stderr)
+		return 1
 	if args.reply_delay < 0:
 		print("--reply-delay must be >= 0", file=sys.stderr)
 		return 1
@@ -308,6 +320,7 @@ def main() -> int:
 	from cansat_hw.radio import RFM69
 	from cansat_hw.radio.wire_protocol import (
 		RadioRuntimeState,
+		TEST_MODE_TLM_INTERVAL_S,
 		apply_mode_iir,
 		build_telemetry_packet,
 		handle_wire_line,
@@ -315,7 +328,7 @@ def main() -> int:
 		test_mode_end,
 		test_mode_tick,
 	)
-	from cansat_hw.telemetry import LogManager
+	from cansat_hw.telemetry import LogManager, state_name
 
 	rfm = RFM69(
 		spi_bus=args.spi_bus,
@@ -376,10 +389,13 @@ def main() -> int:
 			f"({banner_tail})",
 		)
 		while True:
-			# TEST-mode: timer + periodieke telemetrie vóór we verder luisteren.
+			# TEST/MISSION: timer + periodieke telemetrie vóór we verder luisteren.
 			# Geen threads, geen locking — pure coöperatieve scheduling tussen
 			# twee opeenvolgende receive()-calls. Veilig op de Zero 2 W en
-			# voorkomt half-duplex conflicten met inkomende commando's.
+			# voorkomt half-duplex conflicten met inkomende commando's. In
+			# MISSION is dit óók de motor van de flight-state-machine: zonder
+			# autonome TLM-reads beweegt PAD_IDLE → ASCENT → DEPLOYED → LANDED
+			# nooit (ook niet als de Pico tijdelijk uit range is).
 			send_tlm, end_test = test_mode_tick(state)
 			if end_test:
 				dest = state.test_dest_node if state.test_dest_node is not None else args.dest
@@ -412,6 +428,7 @@ def main() -> int:
 					print(
 						"TLM ->",
 						dest,
+						f"mode={state.mode}",
 						f"seq={state.tlm_seq}",
 						f"({len(tlm)} B binary)",
 						"ok=",
@@ -419,10 +436,18 @@ def main() -> int:
 					)
 				elif not ok_tlm:
 					print("WARN: TLM TX failed (radio timeout)", file=sys.stderr)
-				test_mode_advance_tlm(state)
+				# Kies interval per mode: TEST = vaste 1 Hz dry-run cadence,
+				# MISSION = CLI-configureerbaar (default 1.0 s).
+				interval = (
+					float(args.mission_tlm_interval)
+					if state.mode == "MISSION"
+					else TEST_MODE_TLM_INTERVAL_S
+				)
+				test_mode_advance_tlm(state, interval_s=interval)
 
-			# Korte receive-timeout tijdens TEST zodat de timer/interval responsief blijft.
-			rx_timeout = 0.2 if state.mode == "TEST" else args.poll
+			# Korte receive-timeout in TEST/MISSION zodat de TLM-scheduler
+			# responsief blijft (anders zou args.poll—vaak 1+ s—de cadence dempen).
+			rx_timeout = 0.2 if state.mode in ("TEST", "MISSION") else args.poll
 			# with_header=True: afzender = byte 1 voor reply destination
 			# with_ack=False: geen RadioHead-ACK vóór onze tekstantwoord
 			pkt = rfm.receive(timeout=rx_timeout, with_header=True, with_ack=False, keep_listening=True)
@@ -461,12 +486,31 @@ def main() -> int:
 			if args.verbose:
 				print("state.mode =", state.mode)
 
-			# Net overgegaan naar TEST? Onthoud wie het vroeg zodat
-			# unsolicited TLM/EVT naar datzelfde node terug gaan.
+			# Half-duplex marge: gun de Pico een rustig venster (~300 ms)
+			# direct na een reply. Anders kan de TLM-scheduler meteen weer
+			# zenden terwijl de Pico nog bezig is een vervolgcommando over de
+			# lucht te zetten — die clash betekent verloren commando ÉN een
+			# pass-through TLM in plaats van het volgende OK-antwoord.
+			if ok and state.mode in ("TEST", "MISSION"):
+				quiet_until = time.monotonic() + 0.3
+				if (
+					state.test_next_tlm_monotonic is None
+					or state.test_next_tlm_monotonic < quiet_until
+				):
+					state.test_next_tlm_monotonic = quiet_until
+
+			# Net overgegaan naar TEST of MISSION? Onthoud wie het vroeg
+			# zodat unsolicited TLM/EVT naar datzelfde node terug gaan.
+			# (``test_dest_node`` is generiek "active session dest"; naam
+			# blijft voorlopig zo voor backwards-compat met fase 4-tests.)
 			if mode_before != "TEST" and state.mode == "TEST" and ok:
 				state.test_dest_node = int(from_node)
 				if args.verbose:
 					print("TEST: destination set to node", from_node)
+			if mode_before != "MISSION" and state.mode == "MISSION" and ok:
+				state.test_dest_node = int(from_node)
+				if args.verbose:
+					print("MISSION: destination set to node", from_node)
 
 			# Mode-overgang doorgeven aan log writer zodat hij eventueel
 			# een nieuwe ``cansat_<mode>_<UTC>.bin`` opent of afsluit. We
@@ -474,6 +518,27 @@ def main() -> int:
 			# bevestigde state weerspiegelt.
 			if mode_before != state.mode and ok:
 				log_manager.on_mode_change(mode_before, state.mode)
+
+			# Flight-state-overgang? Stuur ongevraagd ``EVT STATE <NAME>``
+			# zodat het base station meteen kan reageren (UI, log). De
+			# state-machine zelf draait in ``handle_wire_line`` (GET ALT /
+			# READ BME280 in MISSION); hier publiceren we alleen het
+			# resultaat. ``last_announced_flight_state`` voorkomt herhaling.
+			if state.flight_state != state.last_announced_flight_state:
+				dest_evt = (
+					state.test_dest_node
+					if state.test_dest_node is not None
+					else args.dest
+				)
+				evt_state = ("EVT STATE %s" % state_name(state.flight_state)).encode("utf-8")
+				ok_evt = rfm.send(evt_state, keep_listening=True, destination=dest_evt)
+				if args.verbose or not ok_evt:
+					print(
+						"STATE -> %s (dest=%d ok=%s)"
+						% (state_name(state.flight_state), dest_evt, ok_evt)
+					)
+				log_manager.write_payload(evt_state)
+				state.last_announced_flight_state = int(state.flight_state)
 
 			if state.pending_freq_mhz is not None and ok:
 				new_freq = float(state.pending_freq_mhz)

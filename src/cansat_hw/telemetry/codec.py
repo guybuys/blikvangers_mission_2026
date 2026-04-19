@@ -91,6 +91,21 @@ STATE_NAMES = {
 	STATE_UNKNOWN: "UNKNOWN",
 }
 
+# Inverse lookup voor `SET STATE <NAME>` over de radio.
+_STATE_BY_NAME = {v: k for k, v in STATE_NAMES.items()}
+
+
+def state_value_for_name(name: str) -> Optional[int]:
+	"""Zet ``"PAD_IDLE"`` / ``"ASCENT"`` / … om naar de state-nibble.
+
+	Retourneert ``None`` voor onbekende namen (incl. ``"UNKNOWN"``: dat is een
+	status, geen geldige opdracht).
+	"""
+	v = _STATE_BY_NAME.get((name or "").upper().strip())
+	if v is None or v == STATE_UNKNOWN:
+		return None
+	return int(v)
+
 # --- Sentinels ----------------------------------------------------------------
 INT16_NA = -0x8000  # -32768
 UINT16_NA = 0xFFFF  # 65535

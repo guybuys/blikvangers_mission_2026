@@ -12,10 +12,16 @@ from typing import Any, List, Optional, Tuple, Union
 
 from cansat_hw.telemetry.codec import (
 	FRAME_SIZE,
+	STATE_ASCENT,
+	STATE_DEPLOYED,
+	STATE_LANDED,
+	STATE_NONE,
+	STATE_PAD_IDLE,
 	TagDetection,
 	mode_for_string,
 	pack_tlm,
-	state_for_mode_string,
+	state_name,
+	state_value_for_name,
 )
 
 # ``MAX_PAYLOAD`` blijft de harde grens van één RFM69-frame (chip-FIFO + 4 B
@@ -67,6 +73,14 @@ TEST_MODE_DEFAULT_S = 10.0
 TEST_MODE_MIN_S = 2.0
 TEST_MODE_MAX_S = 60.0
 TEST_MODE_TLM_INTERVAL_S = 1.0
+
+# MISSION-TLM-loop: standaard tempo waarmee de Zero ongevraagd telemetrie naar
+# het base station pusht zodra MISSION actief is. Lagere getallen = meer data
+# (en hoger CPU/radio-gebruik); hoger = stiller. Configureerbaar via de
+# main-loop (CLI ``--mission-tlm-interval``). De TLM-loop is óók de motor
+# achter de flight-state-machine: zonder reads bewegen ASCENT/DEPLOY/LANDED
+# nooit. Geen apart commando om dit te wijzigen — keuze maken bij boot.
+MISSION_MODE_TLM_INTERVAL_S = 1.0
 
 # ISA barometer-constante (h_m ≈ 44330 * (1 - (p/p0)^0.1903)).
 _ISA_H0_M = 44330.0
@@ -131,6 +145,33 @@ class RadioRuntimeState:
 	# ``build_telemetry_packet`` zelf opgehoogd; de Pico/laptop kan packet-loss
 	# detecteren door gaten in de reeks.
 	tlm_seq: int = field(default=0, repr=False)
+	# Vlucht-substate (Fase 8): één-richting machine PAD_IDLE -> ASCENT ->
+	# DEPLOYED -> LANDED. In CONFIG = NONE; in TEST = DEPLOYED (vast). Wordt in
+	# MISSION dynamisch bijgewerkt door :func:`maybe_advance_flight_state` o.b.v.
+	# de net gemeten ``alt_m`` en ``state.max_alt_m`` (apogee-tracking).
+	# Default = ``STATE_NONE``; ``__post_init__`` synct met ``mode`` zodat
+	# ``RadioRuntimeState(mode="MISSION")`` direct ``PAD_IDLE`` geeft (idem
+	# TEST -> DEPLOYED).
+	flight_state: int = STATE_NONE
+	# Laatst aangekondigde flight_state — main-loop bookkeeping om dubbele EVT
+	# STATE-uitzendingen te voorkomen. Start op ``STATE_NONE`` (gelijk aan de
+	# initiële ``flight_state``) zodat boot in CONFIG geen onnodige
+	# ``EVT STATE NONE`` over de radio gooit; pas bij de eerste echte transitie
+	# (bv. SET MODE MISSION → PAD_IDLE) wordt de EVT verzonden en deze
+	# gelijkgetrokken aan ``flight_state``.
+	last_announced_flight_state: int = field(default=STATE_NONE, repr=False)
+
+	def __post_init__(self) -> None:
+		# Sync flight_state met mode tenzij de aanroeper expliciet een andere
+		# combinatie heeft opgegeven. We doen dit alleen als flight_state nog
+		# op de default ``STATE_NONE`` staat — anders respecteren we de keuze
+		# van de aanroeper (bv. tests die een specifieke transitie checken).
+		if self.flight_state == STATE_NONE:
+			m = (self.mode or "").upper()
+			if m == "TEST":
+				self.flight_state = STATE_DEPLOYED
+			elif m == "MISSION":
+				self.flight_state = STATE_PAD_IDLE
 
 
 def _update_apogee(state: RadioRuntimeState, altitude_m: float, pressure_hpa: float) -> None:
@@ -139,6 +180,59 @@ def _update_apogee(state: RadioRuntimeState, altitude_m: float, pressure_hpa: fl
 		state.max_alt_m = float(altitude_m)
 		state.min_pressure_hpa = float(pressure_hpa)
 		state.max_alt_ts = time_mod.time()
+
+
+# --- Flight-state machine (Fase 8) -------------------------------------------
+# Eén-richting machine die alleen actief is in MISSION. De drempels komen uit
+# ``state.trig_*``-velden (in meters), die team via SET TRIGGER kan tunen.
+# Geen hysteresis: BME280 met IIR×16 in MISSION (~2 cm σ) is al ruim stiller
+# dan de praktische 0.5 m-ondergrens van de drempels — overshoot is dus geen
+# realistisch risico voor de overgangsregels hieronder.
+def evaluate_flight_state(state: RadioRuntimeState, current_alt_m: float) -> int:
+	"""Bereken de volgende ``flight_state`` op basis van ``current_alt_m``.
+
+	Werkt enkel binnen MISSION; in andere modes geeft deze functie de huidige
+	state ongewijzigd terug zodat de aanroeper veilig overal kan callen.
+	Transities zijn strikt vooruit; een zijwaartse of achterwaartse beweging
+	van de hoogte triggert geen rollback.
+	"""
+	cur = int(state.flight_state)
+	if state.mode != "MISSION":
+		return cur
+
+	if cur == STATE_PAD_IDLE:
+		if float(current_alt_m) >= float(state.trig_ascent_height_m):
+			return STATE_ASCENT
+		return cur
+
+	if cur == STATE_ASCENT:
+		if state.max_alt_m is not None:
+			descent = float(state.max_alt_m) - float(current_alt_m)
+			if descent >= float(state.trig_deploy_descent_m):
+				return STATE_DEPLOYED
+		return cur
+
+	if cur == STATE_DEPLOYED:
+		# LANDED: terug binnen ``trig_land_hz_m`` boven (of zelfs onder) grond.
+		# We nemen <= zodat een hoogte van precies de drempel ook al telt.
+		if float(current_alt_m) <= float(state.trig_land_hz_m):
+			return STATE_LANDED
+		return cur
+
+	return cur
+
+
+def maybe_advance_flight_state(state: RadioRuntimeState, current_alt_m: float) -> bool:
+	"""Voer één state-machine-stap uit; retourneer True als de state veranderd is.
+
+	Veilig om altijd te callen: buiten MISSION blijft de state staan zoals hij
+	was (bv. ``DEPLOYED`` in TEST, ``NONE`` in CONFIG).
+	"""
+	new = evaluate_flight_state(state, current_alt_m)
+	if new != int(state.flight_state):
+		state.flight_state = int(new)
+		return True
+	return False
 
 
 def _truncate(msg: bytes) -> bytes:
@@ -203,6 +297,7 @@ _MISSION_ALWAYS_CMDS = frozenset(
 		"GET APOGEE",
 		"GET IIR",
 		"GET ALT PRIME",
+		"GET STATE",
 		"SET MODE CONFIG",
 		"STOP RADIO",
 	}
@@ -217,6 +312,7 @@ _TEST_ALWAYS_CMDS = frozenset(
 		"GET MODE",
 		"GET TIME",
 		"GET IIR",
+		"GET STATE",
 	}
 )
 
@@ -426,6 +522,9 @@ def build_telemetry_packet(
 			if state.ground_hpa is not None:
 				alt_m = pressure_to_altitude_m(p_hpa, float(state.ground_hpa))
 				_update_apogee(state, alt_m, p_hpa)
+				# Voed de flight-state-machine vanuit de TLM-loop. Geen-op
+				# buiten MISSION (TEST blijft DEPLOYED, CONFIG blijft NONE).
+				maybe_advance_flight_state(state, alt_m)
 		except Exception:  # noqa: BLE001
 			alt_m = p_hpa = t_c = None
 
@@ -473,7 +572,10 @@ def build_telemetry_packet(
 
 	frame = pack_tlm(
 		mode=mode_for_string(state.mode),
-		state=state_for_mode_string(state.mode),
+		# Fase 8: gebruik de **dynamische** flight_state (PAD_IDLE, ASCENT,
+		# DEPLOYED, LANDED) i.p.v. een vaste mapping per system mode. Wordt
+		# door SET MODE / state-machine / SET STATE up-to-date gehouden.
+		state=int(state.flight_state),
 		seq=seq,
 		utc_seconds=utc_seconds,
 		utc_ms=utc_ms,
@@ -511,15 +613,22 @@ def test_mode_tick(
 ) -> Tuple[bool, bool]:
 	"""Bepaal of de Zero nu telemetrie moet zenden of TEST moet afsluiten.
 
-	Retourneert ``(send_telemetry, end_test)``. De **caller** doet de TX en
+	Werkt in **TEST én MISSION** — beide modes draaien dezelfde TLM-loop.
+	Retourneert ``(send_telemetry, end_test)``. ``end_test`` is alleen ooit
+	True in TEST (bij verstreken duration). De **caller** doet de TX en
 	roept daarna ``test_mode_end(state)`` aan als ``end_test`` True is.
 	Geen sensor-I/O hier zodat dit deterministisch te testen blijft.
 	"""
-	if state.mode != "TEST":
+	if state.mode not in ("TEST", "MISSION"):
 		return False, False
 	if now_monotonic is None:
 		now_monotonic = time_mod.monotonic()
-	if state.test_deadline_monotonic is not None and now_monotonic >= state.test_deadline_monotonic:
+	# TEST heeft een harde deadline; MISSION loopt door tot SET MODE CONFIG.
+	if (
+		state.mode == "TEST"
+		and state.test_deadline_monotonic is not None
+		and now_monotonic >= state.test_deadline_monotonic
+	):
 		return False, True
 	if state.test_next_tlm_monotonic is not None and now_monotonic >= state.test_next_tlm_monotonic:
 		return True, False
@@ -532,20 +641,31 @@ def test_mode_advance_tlm(
 	now_monotonic: Optional[float] = None,
 	interval_s: float = TEST_MODE_TLM_INTERVAL_S,
 ) -> None:
-	"""Schuif de volgende TLM-deadline op na een geslaagde TX."""
+	"""Schuif de volgende TLM-deadline op na een geslaagde TX.
+
+	De aanroeper kiest een ``interval_s`` dat past bij de actieve mode
+	(``TEST_MODE_TLM_INTERVAL_S`` voor TEST, ``MISSION_MODE_TLM_INTERVAL_S``
+	of een CLI-override voor MISSION).
+	"""
 	if now_monotonic is None:
 		now_monotonic = time_mod.monotonic()
 	state.test_next_tlm_monotonic = now_monotonic + float(interval_s)
 
 
-def test_mode_end(state: RadioRuntimeState) -> None:
-	"""Zet de state netjes terug naar CONFIG ná een TEST-timer-afloop."""
-	state.mode = "CONFIG"
+def _clear_session_bookkeeping(state: RadioRuntimeState) -> None:
+	"""Leeg alle TLM-/TEST-bookkeeping. Gebruikt door SET MODE CONFIG en test_mode_end."""
 	state.test_duration_s = None
 	state.test_start_monotonic = None
 	state.test_deadline_monotonic = None
 	state.test_next_tlm_monotonic = None
 	state.test_dest_node = None
+
+
+def test_mode_end(state: RadioRuntimeState) -> None:
+	"""Zet de state netjes terug naar CONFIG ná een TEST-timer-afloop."""
+	state.mode = "CONFIG"
+	state.flight_state = STATE_NONE
+	_clear_session_bookkeeping(state)
 
 
 def _format_preflight_reply(missing: List[str], info: List[str]) -> bytes:
@@ -625,6 +745,11 @@ def handle_wire_line(
 
 	if su == "SET MODE CONFIG":
 		state.mode = "CONFIG"
+		state.flight_state = STATE_NONE
+		# MISSION/TEST → CONFIG: ruim de TLM-scheduler en session-dest op,
+		# anders blijft de Zero proberen telemetrie te pushen of stuurt hij
+		# bij een volgende mode-wissel meteen naar een verouderd node.
+		_clear_session_bookkeeping(state)
 		apply_mode_iir(state, bme280)
 		return b"OK MODE CONFIG"
 
@@ -640,7 +765,19 @@ def handle_wire_line(
 		)
 		if missing:
 			return _truncate(("ERR PRE " + " ".join(missing)).encode("utf-8"))
+		now = time_mod.monotonic()
 		state.mode = "MISSION"
+		# Start altijd in PAD_IDLE bij overgang naar MISSION; de state-machine
+		# klimt vanaf hier op basis van autonome TLM-reads (mini-fase 7).
+		state.flight_state = STATE_PAD_IDLE
+		# Activeer de MISSION-TLM-loop: zelfde scheduler als TEST, maar zonder
+		# deadline. De main loop kiest het interval (CLI ``--mission-tlm-interval``)
+		# en zet ``test_dest_node`` op ``from_node`` ná het reply zodat
+		# unsolicited TLM/EVT bij de juiste base station aankomt.
+		state.test_next_tlm_monotonic = now + 0.5
+		state.test_duration_s = None
+		state.test_start_monotonic = None
+		state.test_deadline_monotonic = None
 		apply_mode_iir(state, bme280)
 		return b"OK MODE MISSION"
 
@@ -669,6 +806,8 @@ def handle_wire_line(
 			return _truncate(("ERR PRE " + " ".join(missing)).encode("utf-8"))
 		now = time_mod.monotonic()
 		state.mode = "TEST"
+		# TEST is een vaste dry-run van DEPLOYED — geen state-machine.
+		state.flight_state = STATE_DEPLOYED
 		state.test_duration_s = duration
 		state.test_start_monotonic = now
 		state.test_deadline_monotonic = now + duration
@@ -828,6 +967,9 @@ def handle_wire_line(
 			return _truncate(("ERR BME280 %s" % e).encode("utf-8", errors="replace"))
 		alt = pressure_to_altitude_m(float(p_hpa), float(state.ground_hpa))
 		_update_apogee(state, alt, float(p_hpa))
+		# Als we in MISSION zitten, zet de state machine eventueel een stap
+		# vooruit. Buiten MISSION is dit een no-op.
+		maybe_advance_flight_state(state, alt)
 		return _truncate(("OK ALT %.2f %.2f" % (alt, float(p_hpa))).encode("utf-8"))
 
 	if su == "GET ALT PRIME":
@@ -870,6 +1012,21 @@ def handle_wire_line(
 		state.max_alt_ts = None
 		return b"OK APOGEE RESET"
 
+	if su == "GET STATE":
+		return _truncate(("OK STATE %s" % state_name(state.flight_state)).encode("utf-8"))
+
+	if len(tokens) == 3 and tokens[0].upper() == "SET" and tokens[1].upper() == "STATE":
+		# Forceer een flight-state. Alleen in CONFIG bedoeld voor pre-staging
+		# of klas-demo; tijdens MISSION/TEST blijft de state-machine (resp. de
+		# vaste TEST-mapping) heilig.
+		if state.mode != "CONFIG":
+			return b"ERR BUSY"
+		new = state_value_for_name(tokens[2])
+		if new is None:
+			return b"ERR BAD STATE"
+		state.flight_state = int(new)
+		return _truncate(("OK STATE %s" % state_name(new)).encode("utf-8"))
+
 	if su == "PREFLIGHT":
 		missing, info = preflight_checks(
 			state,
@@ -894,6 +1051,7 @@ def handle_wire_line(
 				_, p_hpa, _ = bme280.read()
 				alt = pressure_to_altitude_m(float(p_hpa), float(state.ground_hpa))
 				_update_apogee(state, alt, float(p_hpa))
+				maybe_advance_flight_state(state, alt)
 			except Exception:  # noqa: BLE001
 				pass
 		return _truncate(text.encode("utf-8", errors="replace"))
