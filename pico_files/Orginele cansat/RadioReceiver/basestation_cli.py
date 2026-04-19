@@ -661,17 +661,29 @@ def _is_passthrough_packet(parsed):
 	return kind == "TLM" or (isinstance(kind, str) and kind.startswith("EVT_"))
 
 
-def _recv_reply_filtering_telemetry(wire_line, log_extra_pass=None):
+# Aantal TX-pogingen bij MISSION/TEST-verkeer. RFM69 is half-duplex en doet
+# geen ACK/retry op deze laag; als de Zero net een TLM-frame staat te zenden
+# (of de bijhorende sensor-reads doet) wanneer wij TX'en, raakt ons commando
+# verloren. Met meerdere pogingen verspreiden we onze TX over verschillende
+# fases van de TLM-cyclus zodat er statistisch zeker een poging tijdens een
+# RX-window van de Zero valt.
+MAX_TX_ATTEMPTS = 3
+
+
+def _recv_reply_filtering_telemetry(wire_line, max_wait_s=None, log_extra_pass=None):
 	"""Wacht tot een echte text-reply binnenkomt; passeer TLM/EVT pakketten.
 
 	Retourneert ``(reply_text, parsed)`` of ``(None, None)`` bij timeout.
 	Onderweg printen + loggen we elk passing-through pakket zodat de
 	operator nog steeds telemetrie/EVT-overgangen ziet binnenstromen.
-	De totale wachttijd is de gewone ``REPLY_TIMEOUT_S``; per pass-through
-	pakket telt de tijd die verstreek mee, zodat we niet eindeloos blijven
-	hangen als de Zero alleen maar TLM-frames staat te pompen.
+
+	``max_wait_s`` overrulet ``REPLY_TIMEOUT_S`` voor één call (gebruikt door
+	de retry-loop om elk poging een eigen, korter venster te geven). Tijd
+	verstrijkt cumulatief: pass-through pakketten zonder reply blijven binnen
+	hetzelfde venster.
 	"""
-	deadline_ms = time.ticks_add(time.ticks_ms(), int(REPLY_TIMEOUT_S * 1000))
+	wait_s = float(REPLY_TIMEOUT_S if max_wait_s is None else max_wait_s)
+	deadline_ms = time.ticks_add(time.ticks_ms(), int(wait_s * 1000))
 	while True:
 		remaining_ms = time.ticks_diff(deadline_ms, time.ticks_ms())
 		if remaining_ms <= 0:
@@ -701,37 +713,63 @@ def _recv_reply_filtering_telemetry(wire_line, log_extra_pass=None):
 
 
 def _send_and_wait_reply(wire_line: str):
-	"""Stuurt één pakket naar ``rfm.destination`` en wacht kort op een antwoordpakket."""
+	"""Stuurt één pakket naar ``rfm.destination`` en wacht op een antwoordpakket.
+
+	Bij MISSION/TEST-verkeer probeert deze functie tot ``MAX_TX_ATTEMPTS``
+	keer opnieuw te zenden als er geen text-reply komt binnen het deel-
+	venster (`REPLY_TIMEOUT_S / MAX_TX_ATTEMPTS`). Op die manier valt
+	statistisch elke poging in een ander stuk van de TLM-cyclus van de Zero;
+	zonder dat horen wij dezelfde TLM-burst als "antwoord" of helemaal niets.
+	"""
 	payload = validate_wire_line(wire_line).encode("utf-8")
 	if len(payload) > MAX_PAYLOAD:
 		print("ERR payload te lang")
 		_log_emit("ERR", wire_line, extra={"why": "payload-too-long"})
 		return
-	ok = rfm.send(payload, keep_listening=True)
-	if not ok:
-		print("ERR TX timeout (radio)")
-		_log_emit("ERR", wire_line, extra={"why": "tx-timeout"})
-		return
-	print("TX ->", wire_line)
-	_log_emit("TX", wire_line)
-	if REPLY_GAP_S > 0:
-		time.sleep(REPLY_GAP_S)
-	# Geen clear_fifo() hier: die doet STDBY→RX en wist de RX-FIFO. Een snel
-	# antwoord van de CanSat kan tijdens REPLY_GAP al binnenkomen — dan zou je
-	# het met clear_fifo() weggooien vóór receive().
-	reply_text, parsed = _recv_reply_filtering_telemetry(wire_line)
-	if reply_text is None and parsed is None:
-		print("(geen antwoord binnen %.1f s)" % REPLY_TIMEOUT_S)
-		print("  Tip: start op de CanSat (Zero 2 W) eerst: python scripts/cansat_radio_protocol.py")
-		print("  Probeer: !timeout 5   en/of   !gap 0.1   — zelfde freq/key als CanSat (!info)")
-		_log_emit("TIMEOUT", wire_line, extra={"timeout_s": REPLY_TIMEOUT_S})
-		return
-	print("RX <-", reply_text if reply_text else "(undecodable)")
-	print("    RSSI:", rfm.last_rssi)
-	_update_mode_from_parsed(parsed)
-	_log_emit("RX", reply_text or "", rssi=rfm.last_rssi, parsed=parsed)
-	if reply_text:
-		_post_process_reply(wire_line, reply_text)
+	# Per-poging venster: deel REPLY_TIMEOUT_S over MAX_TX_ATTEMPTS, maar nooit
+	# minder dan 1.0 s (anders krijgt de Zero soms geen kans één TLM af te
+	# maken + te antwoorden).
+	per_try_s = max(1.0, float(REPLY_TIMEOUT_S) / float(MAX_TX_ATTEMPTS))
+	for attempt in range(MAX_TX_ATTEMPTS):
+		ok = rfm.send(payload, keep_listening=True)
+		if not ok:
+			print("ERR TX timeout (radio)")
+			_log_emit("ERR", wire_line, extra={"why": "tx-timeout", "attempt": attempt})
+			return
+		if attempt == 0:
+			print("TX ->", wire_line)
+			_log_emit("TX", wire_line)
+		else:
+			print("TX -> %s (retry %d/%d)" % (wire_line, attempt + 1, MAX_TX_ATTEMPTS))
+			_log_emit(
+				"TX_RETRY",
+				wire_line,
+				extra={"attempt": attempt + 1, "of": MAX_TX_ATTEMPTS},
+			)
+		if REPLY_GAP_S > 0:
+			time.sleep(REPLY_GAP_S)
+		reply_text, parsed = _recv_reply_filtering_telemetry(
+			wire_line, max_wait_s=per_try_s
+		)
+		if reply_text is not None or parsed is not None:
+			print("RX <-", reply_text if reply_text else "(undecodable)")
+			print("    RSSI:", rfm.last_rssi)
+			_update_mode_from_parsed(parsed)
+			_log_emit("RX", reply_text or "", rssi=rfm.last_rssi, parsed=parsed)
+			if reply_text:
+				_post_process_reply(wire_line, reply_text)
+			return
+	# Alle pogingen op — meld dat consistent.
+	print(
+		"(geen antwoord binnen %.1f s, %d pogingen)"
+		% (per_try_s * MAX_TX_ATTEMPTS, MAX_TX_ATTEMPTS)
+	)
+	print("  Tip: !timeout 6   of   verlaag --mission-tlm-interval op de Zero (meer RX-tijd)")
+	_log_emit(
+		"TIMEOUT",
+		wire_line,
+		extra={"timeout_s": REPLY_TIMEOUT_S, "attempts": MAX_TX_ATTEMPTS},
+	)
 
 
 def main():

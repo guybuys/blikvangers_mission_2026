@@ -182,6 +182,18 @@ def _update_apogee(state: RadioRuntimeState, altitude_m: float, pressure_hpa: fl
 		state.max_alt_ts = time_mod.time()
 
 
+def _reset_apogee(state: RadioRuntimeState) -> None:
+	"""Wis apogee-tracking. Aanroepen door ``RESET APOGEE`` én bij elke nieuwe
+	missiestart, anders bestuurt een vorige sessie de DEPLOY-trigger:
+	``(max_alt - current_alt) >= trig_deploy_descent_m`` zou met een stale
+	``max_alt`` van bv. 5 m direct DEPLOYED triggeren zodra je een paar meter
+	stijgt — terwijl de nieuwe missie nog niet eens ASCENT bereikte.
+	"""
+	state.max_alt_m = None
+	state.min_pressure_hpa = None
+	state.max_alt_ts = None
+
+
 # --- Flight-state machine (Fase 8) -------------------------------------------
 # Eén-richting machine die alleen actief is in MISSION. De drempels komen uit
 # ``state.trig_*``-velden (in meters), die team via SET TRIGGER kan tunen.
@@ -770,6 +782,12 @@ def handle_wire_line(
 		# Start altijd in PAD_IDLE bij overgang naar MISSION; de state-machine
 		# klimt vanaf hier op basis van autonome TLM-reads (mini-fase 7).
 		state.flight_state = STATE_PAD_IDLE
+		# Apogee MOET resetten bij elke nieuwe missie, anders bestuurt de
+		# vorige sessie de DEPLOY-trigger. Voorbeeld: een vorige LANDED-run
+		# liet ``max_alt_m=5.08m`` achter; de volgende missie ziet meteen na
+		# een paar meter stijgen ``descent>=3m`` t.o.v. die stale max en
+		# springt prematuur naar DEPLOYED.
+		_reset_apogee(state)
 		# Activeer de MISSION-TLM-loop: zelfde scheduler als TEST, maar zonder
 		# deadline. De main loop kiest het interval (CLI ``--mission-tlm-interval``)
 		# en zet ``test_dest_node`` op ``from_node`` ná het reply zodat
@@ -1007,9 +1025,7 @@ def handle_wire_line(
 		)
 
 	if su == "RESET APOGEE":
-		state.max_alt_m = None
-		state.min_pressure_hpa = None
-		state.max_alt_ts = None
+		_reset_apogee(state)
 		return b"OK APOGEE RESET"
 
 	if su == "GET STATE":

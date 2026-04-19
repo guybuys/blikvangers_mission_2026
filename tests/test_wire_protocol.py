@@ -1326,6 +1326,26 @@ class MissionTlmLoopTest(unittest.TestCase):
 		self.assertIsNone(st.test_deadline_monotonic)
 		self.assertIsNone(st.test_duration_s)
 
+	def test_set_mode_mission_resets_apogee(self) -> None:
+		"""Stale ``max_alt_m`` van een vorige missie mag de DEPLOY-trigger
+		van de nieuwe missie niet verstoren."""
+		from cansat_hw.radio.wire_protocol import handle_wire_line
+
+		st = _valid_state()
+		# Simuleer dat de vorige sessie tot 5.08 m is geweest en LANDED bereikt.
+		st.max_alt_m = 5.08
+		st.min_pressure_hpa = 1020.31
+		st.max_alt_ts = 1_700_000_000.0
+
+		reply = handle_wire_line(
+			self._make_rfm(), st, "SET MODE MISSION",
+			bme280=_fake_bme(), bno055=_fake_bno(),
+		)
+		self.assertEqual(reply, b"OK MODE MISSION")
+		self.assertIsNone(st.max_alt_m)
+		self.assertIsNone(st.min_pressure_hpa)
+		self.assertIsNone(st.max_alt_ts)
+
 	def test_set_mode_config_clears_session_bookkeeping(self) -> None:
 		from cansat_hw.radio.wire_protocol import handle_wire_line
 
