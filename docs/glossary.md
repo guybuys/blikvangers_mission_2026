@@ -21,6 +21,8 @@ in deze repo. Andere documenten linken hier naartoe bij eerste gebruik.
 | **IMU** | Inertial Measurement Unit | Verzamelterm voor accelerometer + gyroscoop (+ magnetometer). Bij ons = BNO055. |
 | **AprilTag** | Visueel fiducial-marker | Zwart/wit vierkant, vergelijkbaar met QR-code; door de camera op de Zero gedetecteerd voor doel-localisatie tijdens `DEPLOYED`. |
 | **Gimbal** | 2-as servo-platform | Houdt camera horizontaal tijdens descent, aangestuurd via `pigpio` op basis van BNO055-Euler. |
+| **stowed** | "Ingeklapte" servo-positie | Veilige mechanische rust-stand voor in-rocket en post-landing. Gekalibreerd per servo (`stow_us` in `config/gimbal/servo_calibration.json`). Gebruikt door `SERVO STOW` / `SERVO PARK` en autonoom bij `MISSION`-entry, `LANDED`, `END_TEST` en service-shutdown. |
+| **rail (servo-rail)** | Voedingslijn naar de servo's | Schakelbaar via BCM6 (`servo_rail_set`). "Rail aan" = stroom op servo's; "rail uit" = vrij draaibaar, geen verbruik. Policy: in `CONFIG` operator-controlled, in `MISSION`/`TEST` automatisch bepaald door flight-state. |
 | **CSI** | Camera Serial Interface | Lint-connector voor de Pi Camera Module. |
 | **I²C / SPI** | Bus-protocollen | I²C voor BME280/BNO055 (twee draden), SPI voor RFM69 (vier draden). |
 | **GPIO / BCM** | General-Purpose I/O / Broadcom-pinnummering | Zie [`rpi_pinning.md`](rpi_pinning.md). BCM-nummering is wat Python-libraries gebruiken; fysieke pin-nummers zijn de "1..40" van de header. |
@@ -54,6 +56,7 @@ en [`src/cansat_hw/radio/wire_protocol.py`](../src/cansat_hw/radio/wire_protocol
 | **seq** | Sequence counter | Oplopend nummer per TLM-frame (16-bit, wrapt op 0xFFFF). Gat = packetloss (per-mission file) of sessie-reset (continuous file). |
 | **`mode_state`** | 1-byte combinatie | Hoge nibble = mode (CONFIG/MISSION/TEST), lage nibble = flight-state (PAD_IDLE/ASCENT/...). |
 | **PING / OK / ERR** | Wire-commando-replies | Pico stuurt `PING`, Zero antwoordt `OK PING`. Algemene patroon: `OK <cmd> [args]` of `ERR <reden>`. |
+| **`SERVO ...`** | Wire-commando-familie | Servo-tuning + park/stow vanaf het base station. `SERVO START/STEP/SET/MIN/CENTER/MAX/STOW/SAVE/STOP` voor calibratie; `SERVO ENABLE/DISABLE/STOW/PARK` voor rail-bediening. Alleen toegelaten in `CONFIG`-mode. Zie [planning Fase 12](planning.md#fase-12--servo-tuning--parkstow-via-radio). |
 | **PREFLIGHT** | Pre-launch check | Zero controleert `TIME`/`GND`/`BME`/`IMU`/`DSK`/`LOG`/`FRQ`/`GIM` voor mode-wissel. Falen → `ERR PRE <welke>`. |
 | **`STOP RADIO`** | Wire-commando | Stopt de service op de Zero. Exit-code 0 → systemd herstart **niet** (`Restart=on-failure`). |
 

@@ -117,61 +117,142 @@ positie + grootte) meesturen in elk TLM-frame.
 - Process of thread? Process geeft betere CPU-isolatie maar IPC-overhead.
 - Camera-resolutie vs detectie-snelheid (640×480 of 1280×720).
 
-### Fase 12 — Servo-tuning via radio 📋
+### Fase 12 — Servo-tuning + park/stow via radio 📋
 
-**Doel**: gimbal-servo-calibratie kunnen doen vanaf het base station,
-zonder SSH op de Zero. Equivalent van de bestaande
-[`scripts/gimbal/servo_calibration.py`](../scripts/gimbal/servo_calibration.py)
-maar bedienbaar via de Pico-CLI.
+**Doel**: gimbal-servo's volledig bedienbaar via het base station — zowel
+**calibreren** (equivalent van [`scripts/gimbal/servo_calibration.py`](../scripts/gimbal/servo_calibration.py))
+als **veilig opbergen** vóór en na de vlucht — zonder SSH op de Zero.
 
-**Aanpak (gekozen)**: **sub-state binnen `CONFIG`** + sub-REPL op de Pico
-met dezelfde letters als het lokale script.
+**Aanpak (gekozen)**: **tuning-sub-state binnen `CONFIG`** + sub-REPL op
+de Pico met dezelfde letters als het lokale script. **Rail-policy gekoppeld
+aan flight-state** in `MISSION`/`TEST` (Zero bepaalt autonoom wanneer
+servo's stroom krijgen). In `CONFIG` beslist de operator volledig.
 
-**Wire-commando's (Zero, alleen toegelaten in `CONFIG`)**:
+#### Calibration-JSON (uitbreiding)
+
+Per servo één extra veld erbij naast `min_us` / `center_us` / `max_us`:
+
+| Veld | Betekenis |
+|---|---|
+| `stow_us` | Veilige "ingeklapte" positie. Gebruikt voor in-rocket en post-landing — zie [glossary: stowed](glossary.md#hardware). |
+
+Eén positie volstaat: in beide gevallen wil je dezelfde mechanische
+toestand (gimbal compact + geen stroom).
+
+#### Wire-commando's
+
+**Tuning** (alleen in `CONFIG`):
 
 | Commando | Reply | Effect |
 |---|---|---|
-| `SERVO START [1\|2]` | `OK SERVO START <s> <us>` | Rail aan, selecteer servo, ga in tuning-state |
-| `SERVO STEP <±N>` | `OK SERVO STEP <s> <us>` | Relatief in µs, geclamped op min/max |
-| `SERVO SET <us>` | `OK SERVO SET <s> <us>` | Absoluut |
-| `SERVO MIN\|CENTER\|MAX` | `OK SERVO <kind> <s> <us>` | Markeer huidige als grenswaarde |
+| `SERVO START [1\|2]` | `OK SERVO START <s> <us>` | Rail aan, selecteer servo, ga in tuning-state, pulse = laatste of `center_us` |
+| `SERVO SEL <1\|2>` | `OK SERVO SEL <s>` | (optioneel — Pico kan dit ook lokaal in de UI) |
+| `SERVO STEP <±N>` | `OK SERVO STEP <s> <us>` | Relatief in µs, geclamped op `[min_us, max_us]` |
+| `SERVO SET <us>` | `OK SERVO SET <s> <us>` | Absoluut, geclamped |
+| `SERVO MIN\|CENTER\|MAX\|STOW` | `OK SERVO <kind> <s> <us>` | Markeer huidige pulsewidth als die grenswaarde |
 | `SERVO SAVE` | `OK SERVO SAVE` | Schrijf `config/gimbal/servo_calibration.json` |
-| `SERVO STOP [SAVE\|DISCARD]` | `OK SERVO STOP` | Verlaat tuning-state, rail uit |
-| `SERVO STATUS` | `OK SERVO <s> us=… min=… cen=… max=…` | Polling |
-| `SERVO SEL <1\|2>` | `OK SERVO SEL <s>` | (optioneel — Pico kan dit ook lokaal) |
+| `SERVO STOP` | `OK SERVO STOP` | Verlaat tuning-state. Rail blijft staan — operator stuurt zelf `SERVO DISABLE` als gewenst |
+| `SERVO STATUS` | `OK SERVO <s> us=… min=… cen=… max=… stow=… rail=ON\|OFF` | Polling |
 
-**Pico CLI**:
+**Park / stow** (alleen in `CONFIG`, los van tuning):
+
+| Commando | Reply | Effect |
+|---|---|---|
+| `SERVO ENABLE` | `OK SERVO ENABLE` | Rail aan (BCM6 via [`servo_rail_set`](../src/cansat_hw/servos/power_enable.py)). Géén pulse — servo's los maar onder spanning |
+| `SERVO DISABLE` | `OK SERVO DISABLE` | PWM=0 op beide, rail uit. Onmiddellijk; servo die nog beweegt valt vrij |
+| `SERVO STOW [1\|2\|BOTH]` | `OK SERVO STOW <s> <us>` | Stuur stow-pulse. **Géén wait** — operator wacht visueel en stuurt zelf `SERVO DISABLE` als hij stroom wil afkappen |
+| `SERVO PARK` | `OK SERVO PARK` | Samengesteld convenience: `ENABLE` → `STOW BOTH` → wacht intern 800 ms → `DISABLE`. Eén round-trip voor "alles veilig opbergen" |
+
+**Waarom "geen `wait_ms` in `SERVO STOW`"?** Hobby-servo's hebben geen
+encoder-feedback. In CONFIG kan de operator visueel checken of de servo is
+aangekomen vóór `SERVO DISABLE` te sturen — veel betrouwbaarder dan een
+geraden timeout. `SERVO PARK` gebruikt voor de autonome use-case wél een
+interne 800 ms (datasheet: ~0,17 s/60° onbelast → ×2 onder belasting ⇒
+~600 ms full-sweep + marge), hard-coded zodat een verkeerde Pico-call
+nooit lange blokkades kan veroorzaken op de Zero.
+
+#### Autonome rail-policy in `MISSION` / `TEST`
+
+In `MISSION` en `TEST` beslist de Zero zelf, **niet** de operator. Alle
+`SERVO ...`-commando's vanaf de Pico worden geweigerd: `ERR SERVO BUSY
+<mode>`.
+
+| Transitie | Servo-actie |
+|---|---|
+| `CONFIG` → `MISSION` (preflight ok, state = `PAD_IDLE`) | `ENABLE` → `STOW BOTH` → 800 ms wait → `DISABLE`. Servo's mechanisch in stow, geen stroom |
+| `PAD_IDLE` → `ASCENT` | (niets — rail blijft uit; gimbal niet nodig tijdens boost) |
+| `ASCENT` → `DEPLOYED` | (in Fase 12: niets. Fase 9 zal hier `ENABLE` toevoegen + gimbal-loop starten) |
+| `DEPLOYED` → `LANDED` | (in Fase 12: niets actief; als Fase 9 de rail aan had: `STOW BOTH` → 800 ms → `DISABLE`) |
+| `END_TEST` (Zero → `CONFIG`) | Idem als hierboven: stow + disable als rail aan was |
+| Service shutdown (`STOP RADIO`, SIGTERM) | atexit: `STOW BOTH` → 800 ms → `DISABLE` |
+
+#### Preflight `SVO`
+
+Bij `SET MODE MISSION`/`SET MODE TEST` checkt de Zero:
+
+- `stow_us` is gekalibreerd voor beide servo's — anders `ERR PRE SVO STOW`
+- Geen tuning-state actief — anders `ERR PRE SVO BUSY`
+- pigpio-daemon bereikbaar — anders `ERR PRE SVO PIGPIO`
+
+Faalt iets → blijven in `CONFIG`, geen rail-acties.
+
+#### Pico CLI
+
+**`!servo` sub-REPL** (zelfde letters als [`scripts/gimbal/servo_calibration.py`](../scripts/gimbal/servo_calibration.py)):
 
 ```text
-BS> !servo                ← stuurt SERVO START, opent sub-REPL
-servo[S1 1500]> d         ← +step → SERVO STEP +10
-servo[S1 1510]> D         ← +bigstep → SERVO STEP +50
-servo[S1 1560]> 2         ← lokaal: switch UI naar S2 (geen TX nodig als Zero al weet)
-servo[S2 1500]> x         ← SERVO CENTER
-servo[S2 1500]> s         ← SERVO SAVE
-servo[S2 1500]> q         ← SERVO STOP, terug naar BS>
+BS> !servo                  ← stuurt SERVO START, opent sub-REPL
+servo[S1 1500 rail=ON]> d   ← +step → SERVO STEP +10
+servo[S1 1510 rail=ON]> D   ← +bigstep → SERVO STEP +50
+servo[S1 1560 rail=ON]> 2   ← lokaal: switch UI naar S2 + SERVO SEL 2
+servo[S2 1500 rail=ON]> x   ← SERVO CENTER (markeer huidige als center)
+servo[S2 1500 rail=ON]> w   ← SERVO STOW (nieuwe letter — markeer huidige als stowed)
+servo[S2 1500 rail=ON]> s   ← SERVO SAVE
+servo[S2 1500 rail=ON]> q   ← SERVO STOP — rail blijft staan, operator beslist
 ```
 
-Letters identiek aan `scripts/gimbal/servo_calibration.py` zodat leerlingen
-die het lokaal kennen niets nieuws hoeven te leren.
+**Top-level commando's** (los van de sub-REPL):
 
-**Veiligheid**:
-- **Watchdog op de Zero**: 60 s zonder `SERVO`-commando ⇒ automatisch
-  `SERVO STOP DISCARD`, rail uit. Voorkomt dat servo's blijven trekken als
-  de Pico crasht of buiten radio-bereik raakt.
+```text
+BS> !park                   ← stuurt SERVO PARK (alles veilig opbergen — vóór MISSION-start)
+BS> !servo enable           ← rail aan zonder de sub-REPL te openen
+BS> !servo disable          ← rail uit
+BS> !servo status           ← één-shot SERVO STATUS, geen sub-REPL
+```
+
+#### Veiligheid
+
+- **Watchdog op de Zero**: 60 s zonder `SERVO`-commando tijdens
+  tuning-state ⇒ automatisch `SERVO STOP` + `SERVO DISABLE`. Voorkomt
+  vastzittende rails als de Pico crasht of buiten radio-bereik raakt.
+- **`SERVO PARK` interne wait hard-cap**: 800 ms vast in code; geen
+  wire-parameter zodat een verkeerde Pico-call nooit lange blokkades
+  veroorzaakt op de Zero.
 - **Buiten `CONFIG` geweigerd**: `ERR SERVO BUSY <mode>` — geen tuning
   tijdens `MISSION`/`TEST`.
-- **Geen invloed op flight-state**: tuning is een puur CONFIG-feature, de
-  state-machine merkt er niets van.
+- **Service-shutdown atexit**: `STOW + DISABLE` ook bij SIGTERM/CTRL-C.
 
-**Belangrijkste files**:
-- Nieuw: `src/cansat_hw/servos/tuner.py` (state + watchdog + JSON I/O).
-- [`src/cansat_hw/radio/wire_protocol.py`](../src/cansat_hw/radio/wire_protocol.py) (`SERVO …`-handler).
-- [`basestation_cli.py`](../pico_files/Orginele%20cansat/RadioReceiver/basestation_cli.py) (`!servo` sub-REPL).
-- Tests: round-trip wire-commando's + watchdog-fire-na-60s.
-- Docs: nieuwe sectie in [`scripts/gimbal/README.md`](../scripts/gimbal/README.md) over de twee gelijkwaardige tooling-paden (lokaal vs radio), beide schrijven dezelfde JSON.
+#### Belangrijkste files
 
-**Geschat werk**: ≈ 200–300 regels code + tests + docs.
+- Nieuw: `src/cansat_hw/servos/tuner.py` — tuning-state, watchdog, rail-controle, JSON I/O.
+- Nieuw: `src/cansat_hw/servos/state_policy.py` — kleine pure helper die voor een gegeven flight-state-transitie de gewenste rail-actie teruggeeft (eenvoudig te unit-testen).
+- [`src/cansat_hw/servos/power_enable.py`](../src/cansat_hw/servos/power_enable.py) — bestaand, geen wijziging.
+- [`src/cansat_hw/radio/wire_protocol.py`](../src/cansat_hw/radio/wire_protocol.py) — `SERVO …`-dispatcher.
+- [`scripts/cansat_radio_protocol.py`](../scripts/cansat_radio_protocol.py) — autonome rail-actie hooken aan bestaand `_emit_evt_state_if_changed()`.
+- [`basestation_cli.py`](../pico_files/Orginele%20cansat/RadioReceiver/basestation_cli.py) — `!servo` sub-REPL + `!park` + `!servo enable/disable/status`.
+- `config/gimbal/servo_calibration.json` — `stow_us` per servo (additive, oude files blijven werken).
+- Tests:
+  - Round-trip wire-commando's (`SERVO START`/`STEP`/`STOW`/`PARK`/`DISABLE`).
+  - Watchdog-fire-na-60s.
+  - State-policy table (PAD_IDLE → rail off, etc.) als pure function.
+  - Preflight `SVO`-check.
+- Docs:
+  - [`scripts/gimbal/README.md`](../scripts/gimbal/README.md) — sectie over de twee gelijkwaardige tooling-paden (SSH-script vs radio), beide schrijven dezelfde JSON.
+  - [`docs/glossary.md`](glossary.md) — `stowed`, `SERVO`-commando's, rail-policy entries.
+  - [`docs/mission_states.md`](mission_states.md) — rail-policy per flight-state.
+
+**Geschat werk**: ≈ 350–450 regels code + tests + docs (iets meer dan
+oorspronkelijke schatting door park/stow + state-policy).
 
 ### Fase 5 — Pico binary log naar LittleFS 💭
 
