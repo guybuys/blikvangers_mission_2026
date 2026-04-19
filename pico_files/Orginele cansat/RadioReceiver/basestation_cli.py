@@ -378,8 +378,10 @@ def _print_help_local():
 	print("  !servo enable  zet servo-rail aan (geen pulse)")
 	print("  !servo disable zet servo-rail uit (stopt tuning indien actief)")
 	print("  !servo park    PARK-sequentie: rail aan -> stow -> wacht 800ms -> rail uit")
+	print("  !servo home    HOME: rail aan + beide servo's naar center_us (rail blijft aan)")
 	print("  !servo status  toont rail/tuning/cur-us van de Zero-controller")
 	print("  !park          alias voor !servo park (snelle veilige stow)")
+	print("  !home          alias voor !servo home (centerstand vasthouden)")
 	print("  !log on [pad]  start JSONL-log (default cansat_<ts>.jsonl op Pico-flash)")
 	print("  !log off       sluit de huidige log af")
 	print("  !log status    toont of er gelogd wordt + pad")
@@ -395,7 +397,7 @@ def _print_servo_help():
 	print("  a / d          -10 / +10 µs  (klein)")
 	print("  A / D          -50 / +50 µs  (groot)")
 	print("  N              SET us-waarde (bv. 1500)")
-	print("  z / x / c      mark MIN / CENTER / MAX op huidige us")
+	print("  z / c / x      mark MIN / CENTER / MAX op huidige us")
 	print("  w              mark STOW op huidige us")
 	print("  p              status (rail/tuning/cur-us/cal)")
 	print("  s              SAVE calibratie naar JSON op de Zero")
@@ -444,10 +446,10 @@ def _run_servo_repl():
 		if cmd == "z":
 			_send_and_wait_reply("SERVO MIN")
 			continue
-		if cmd == "x":
+		if cmd == "c":
 			_send_and_wait_reply("SERVO CENTER")
 			continue
-		if cmd == "c":
+		if cmd == "x":
 			_send_and_wait_reply("SERVO MAX")
 			continue
 		if cmd == "w":
@@ -574,6 +576,8 @@ def _handle_local(line: str) -> bool:
 			_send_and_wait_reply("GET ALT PRIME")
 	elif cmd == "!park":
 		_send_and_wait_reply("SERVO PARK")
+	elif cmd == "!home":
+		_send_and_wait_reply("SERVO HOME")
 	elif cmd == "!servo":
 		if len(parts) < 2:
 			_run_servo_repl()
@@ -585,6 +589,8 @@ def _handle_local(line: str) -> bool:
 			_send_and_wait_reply("SERVO DISABLE")
 		elif sub == "park":
 			_send_and_wait_reply("SERVO PARK")
+		elif sub == "home":
+			_send_and_wait_reply("SERVO HOME")
 		elif sub == "stow":
 			_send_and_wait_reply("SERVO STOW")
 		elif sub == "status":
@@ -592,7 +598,7 @@ def _handle_local(line: str) -> bool:
 		elif sub == "tune":
 			_run_servo_repl()
 		else:
-			print("ERR: !servo [enable|disable|park|stow|status|tune] of !servo (= tune)")
+			print("ERR: !servo [enable|disable|park|home|stow|status|tune] of !servo (= tune)")
 	elif cmd == "!test":
 		seconds = 10.0
 		if len(parts) >= 2:

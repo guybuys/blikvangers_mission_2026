@@ -161,6 +161,86 @@ class WireServoParkTest(unittest.TestCase):
 			self.assertFalse(servo.tuning_active)
 
 
+class WireServoHomeTest(unittest.TestCase):
+	def test_home_writes_center_and_keeps_rail_on(self) -> None:
+		with tempfile.TemporaryDirectory() as td:
+			servo = _make_servo(Path(td))
+			st = RadioRuntimeState()
+			out = handle_wire_line(_fake_rfm(), st, "SERVO HOME", servo=servo)
+			self.assertEqual(out, b"OK SVO HOME US1=1500 US2=1600")
+			self.assertTrue(servo.rail_on)
+
+	def test_home_without_center_errors(self) -> None:
+		with tempfile.TemporaryDirectory() as td:
+			servo = _make_servo(Path(td), full_cal=False)
+			st = RadioRuntimeState()
+			out = handle_wire_line(_fake_rfm(), st, "SERVO HOME", servo=servo)
+			self.assertEqual(out, b"ERR SVO NOCEN")
+
+	def test_home_blocked_during_tuning(self) -> None:
+		with tempfile.TemporaryDirectory() as td:
+			servo = _make_servo(Path(td))
+			st = RadioRuntimeState()
+			handle_wire_line(_fake_rfm(), st, "SERVO START", servo=servo)
+			out = handle_wire_line(_fake_rfm(), st, "SERVO HOME", servo=servo)
+			self.assertEqual(out, b"ERR SVO TUNON")
+
+	def test_home_blocked_in_mission(self) -> None:
+		# Eerste verdedigingslaag: MISSION-allowlist blokkeert al vóór
+		# de SERVO-dispatcher (alleen STATUS staat in de allowlist). Dit
+		# bewijst dat HOME nooit autonoom door de mission-state heen kan.
+		with tempfile.TemporaryDirectory() as td:
+			servo = _make_servo(Path(td))
+			st = RadioRuntimeState(mode="MISSION")
+			out = handle_wire_line(_fake_rfm(), st, "SERVO HOME", servo=servo)
+			self.assertEqual(out, b"ERR BUSY MISSION")
+
+
+class WireServoStatusTouchesWatchdogTest(unittest.TestCase):
+	def test_status_resets_watchdog_during_tuning(self) -> None:
+		"""Repro van het veld-probleem: na 60+ s inactief was de watchdog
+		afgegaan. Nu mag een ``SERVO STATUS`` (Pico ``p``-toets) hem
+		resetten zodat de operator de REPL kan refreshen zonder beweging."""
+		clock_t = [0.0]
+		with tempfile.TemporaryDirectory() as td:
+			cal_path = Path(td) / "servo_calibration.json"
+			cal_path.write_text(
+				json.dumps(
+					{
+						"servo1": {"gpio": 13, "min_us": 1000, "center_us": 1500, "max_us": 2000, "stow_us": 1100},
+						"servo2": {"gpio": 12, "min_us": 1100, "center_us": 1600, "max_us": 2100, "stow_us": 2000},
+					}
+				),
+				encoding="utf-8",
+			)
+			servo = ServoController(
+				FakeRailDriver(),
+				cal_path,
+				tuning_watchdog_s=2.0,
+				monotonic_func=lambda: clock_t[0],
+				sleep_func=lambda s: None,
+			)
+			st = RadioRuntimeState()
+			handle_wire_line(_fake_rfm(), st, "SERVO START", servo=servo)
+			# Tel 5 "rondes" van 1 fake-seconde: STATUS moet de watchdog
+			# elke keer resetten zodat we ruim voorbij 2 s blijven leven.
+			for _ in range(5):
+				clock_t[0] += 1.0
+				out = handle_wire_line(_fake_rfm(), st, "SERVO STATUS", servo=servo)
+				self.assertTrue(out.startswith(b"OK SVO"))
+				self.assertIsNone(servo.tick())
+			self.assertTrue(servo.tuning_active)
+
+	def test_status_does_not_reset_outside_tuning(self) -> None:
+		"""``note_activity`` mag geen tuning-state introduceren als die
+		niet draaide (hij is een no-op buiten tuning)."""
+		with tempfile.TemporaryDirectory() as td:
+			servo = _make_servo(Path(td))
+			st = RadioRuntimeState()
+			handle_wire_line(_fake_rfm(), st, "SERVO STATUS", servo=servo)
+			self.assertFalse(servo.tuning_active)
+
+
 class WireSvoPreflightTest(unittest.TestCase):
 	def _bme(self):
 		b = MagicMock()

@@ -43,8 +43,8 @@ Controls
   a / d            -step / +step (small)
   A / D            -bigstep / +bigstep
   z                set current as MIN for selected servo
-  x                set current as CENTER for selected servo
-  c                set current as MAX for selected servo
+  c                set current as CENTER for selected servo
+  x                set current as MAX for selected servo
   p                print current state
   s                save calibration JSON
   o                turn OFF pulses for selected servo
@@ -194,11 +194,11 @@ def main() -> int:
 				cal[selected].min_us = current_us[selected]
 				print(_status_line(selected, current_us, cal))
 				continue
-			if cmd == "x":
+			if cmd == "c":
 				cal[selected].center_us = current_us[selected]
 				print(_status_line(selected, current_us, cal))
 				continue
-			if cmd == "c":
+			if cmd == "x":
 				cal[selected].max_us = current_us[selected]
 				print(_status_line(selected, current_us, cal))
 				continue

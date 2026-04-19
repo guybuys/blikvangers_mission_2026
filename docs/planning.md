@@ -64,11 +64,11 @@ de pas met de werkelijkheid en wordt hij waardeloos.
 | Onderdeel | Belangrijkste files |
 |---|---|
 | Pure helper voor rail-policy bij flight-state-overgangen (PARK / ENABLE / DISABLE / NONE) | [`src/cansat_hw/servos/state_policy.py`](../src/cansat_hw/servos/state_policy.py) |
-| `ServoController` met rail/pulse/stow/park, tuning sub-state, watchdog (60 s), JSON I/O incl. `stow_us`, dependency-injected driver | [`src/cansat_hw/servos/controller.py`](../src/cansat_hw/servos/controller.py) |
-| `SERVO …`-dispatcher in het wire-protocol + `SVO`-preflight check + MISSION-allowlist voor `SERVO STATUS` | [`src/cansat_hw/radio/wire_protocol.py`](../src/cansat_hw/radio/wire_protocol.py) |
+| `ServoController` met rail/pulse/stow/park/home, tuning sub-state, watchdog (300 s, reset op iedere SERVO-actie incl. STATUS), JSON I/O incl. `stow_us`, dependency-injected driver | [`src/cansat_hw/servos/controller.py`](../src/cansat_hw/servos/controller.py) |
+| `SERVO …`-dispatcher in het wire-protocol + `SVO`-preflight check + MISSION-allowlist voor `SERVO STATUS` + `SERVO HOME` (centerstand vasthouden) | [`src/cansat_hw/radio/wire_protocol.py`](../src/cansat_hw/radio/wire_protocol.py) |
 | Autonome rail-policy hook in de main loop + watchdog-tick + atexit-park | [`scripts/cansat_radio_protocol.py`](../scripts/cansat_radio_protocol.py) |
-| Pico CLI: `!servo` sub-REPL + `!park` + `!servo enable/disable/status/tune` | [`basestation_cli.py`](../pico_files/Orginele%20cansat/RadioReceiver/basestation_cli.py) |
-| Tests: state-policy table, controller (rail / stow / park / tuning / watchdog / JSON), wire-roundtrip, SVO-preflight | [`tests/test_servo_state_policy.py`](../tests/test_servo_state_policy.py), [`tests/test_servo_controller.py`](../tests/test_servo_controller.py), [`tests/test_servo_wire.py`](../tests/test_servo_wire.py) |
+| Pico CLI: `!servo` sub-REPL (toets-mapping `z=MIN c=CENTER x=MAX w=STOW`) + `!park` + `!home` + `!servo enable/disable/park/home/stow/status/tune` | [`basestation_cli.py`](../pico_files/Orginele%20cansat/RadioReceiver/basestation_cli.py) |
+| Tests: state-policy table, controller (rail / stow / park / home / tuning / watchdog / JSON), wire-roundtrip, SVO-preflight | [`tests/test_servo_state_policy.py`](../tests/test_servo_state_policy.py), [`tests/test_servo_controller.py`](../tests/test_servo_controller.py), [`tests/test_servo_wire.py`](../tests/test_servo_wire.py) |
 
 **Wire-conventie**: replies zijn `OK SVO …` / `ERR SVO …` (3-letter code
 zodat het binnen 60 B past, gelijk aan de preflight `SVO`-code).
@@ -86,6 +86,18 @@ zodat het binnen 60 B past, gelijk aan de preflight `SVO`-code).
   dry-run van `DEPLOYED`, dus de gimbal hoort actief te zijn.
 - Op `MISSION → CONFIG` doet de policy **niets autonoom**: operator forceerde
   abort, dus geen ongewenste extra beweging.
+- **Field-fix (na eerste hands-on tuning)**: tijdens een tuning-sessie wordt de
+  cal-clamp (`min_us`/`max_us`) genegeerd zodat de operator een ruimere range
+  kan zoeken; alleen de hardware-cap (500..2500 µs) blijft gelden. Buiten
+  tuning blijft `cal.clamp` actief tegen corrupte JSON / mis-getypeerde sets.
+- **Field-fix**: watchdog 60 s → 300 s; en `SERVO STATUS` (Pico-toets `p`) reset
+  hem ook, zodat de operator de REPL kan refreshen zonder iets te bewegen.
+- **Field-fix**: toets-mapping in beide tuning-paden (Pico `!servo` én lokaal
+  `scripts/gimbal/servo_calibration.py`) is **`z`=MIN, `c`=CENTER, `x`=MAX**
+  (in plaats van het oudere, contra-intuïtieve `z`/`x`/`c`).
+- **Convenience**: `SERVO HOME` (en Pico-shortcuts `!home` / `!servo home`)
+  zet beide servo's actief op `center_us` met de rail aan — bedoeld voor
+  visuele validatie van een verse calibratie.
 
 ### Tooling rond logs ✅
 

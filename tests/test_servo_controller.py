@@ -169,22 +169,36 @@ class TuningTest(unittest.TestCase):
 			pulse_calls = [c for c in drv.calls if c[0] == "pulse"]
 			self.assertEqual(pulse_calls[0], ("pulse", 13, 1500))
 
-	def test_step_clamps_to_max(self) -> None:
+	def test_step_ignores_cal_max_during_tuning(self) -> None:
+		"""Tuning mag voorbij de bestaande cal-grenzen — anders kun je nooit
+		een ruimere MAX zoeken. Hardware-cap (2500 µs) blijft wel gelden."""
 		with tempfile.TemporaryDirectory() as td:
 			ctrl, _, _ = _make_controller(Path(td))
 			ctrl.start_tuning(1)
-			# 1500 + 100 * 6 = 2100 → clamp naar max=2000
 			for _ in range(6):
 				ctrl.step(100)
-			self.assertEqual(ctrl.status().current_us[1], 2000)
+			self.assertEqual(ctrl.status().current_us[1], 2100)
 
-	def test_set_us_outside_hw_range_via_clamp(self) -> None:
+	def test_set_us_clamps_to_hw_only_during_tuning(self) -> None:
+		"""``SERVO SET 800`` mag tijdens tuning gewoon 800 worden (buiten
+		cal-min=1000 maar binnen HW-min=500). 400 moet wél naar 500."""
 		with tempfile.TemporaryDirectory() as td:
 			ctrl, _, _ = _make_controller(Path(td))
 			ctrl.start_tuning(1)
-			# Buiten cal-min → clamp naar 1000 (min).
 			ctrl.set_us(800)
-			self.assertEqual(ctrl.status().current_us[1], 1000)
+			self.assertEqual(ctrl.status().current_us[1], 800)
+			ctrl.set_us(400)
+			self.assertEqual(ctrl.status().current_us[1], 500)
+
+	def test_runtime_pulses_still_clamped_by_calibration(self) -> None:
+		"""Buiten tuning (autonome stow / mission-runtime) blijft cal.clamp
+		actief: een corrupte JSON of mis-getypeerd pulse mag de servo nooit
+		voorbij zijn mechanische grens duwen."""
+		with tempfile.TemporaryDirectory() as td:
+			ctrl, _, _ = _make_controller(Path(td))
+			# Forceer een pulse buiten tuning via _write_pulse: 800 < cal.min=1000.
+			out = ctrl._write_pulse(1, 800)  # noqa: SLF001 — direct unit-check
+			self.assertEqual(out, 1000)
 
 	def test_mark_stow_updates_calibration(self) -> None:
 		with tempfile.TemporaryDirectory() as td:
@@ -236,6 +250,28 @@ class WatchdogTest(unittest.TestCase):
 			clock.t += 1.5
 			self.assertIsNone(ctrl.tick())  # nog binnen het venster sinds reset.
 
+	def test_note_activity_resets_watchdog(self) -> None:
+		"""``SERVO STATUS`` (read-only) mag de watchdog ook resetten zodat
+		de operator de REPL kan refreshen zonder iets te bewegen."""
+		with tempfile.TemporaryDirectory() as td:
+			ctrl, _, clock = _make_controller(Path(td))
+			ctrl.start_tuning(1)
+			clock.t += TUNING_WATCHDOG_S - 1.0
+			ctrl.note_activity()
+			clock.t += 1.5
+			self.assertIsNone(ctrl.tick())
+
+	def test_note_activity_noop_outside_tuning(self) -> None:
+		with tempfile.TemporaryDirectory() as td:
+			ctrl, _, _ = _make_controller(Path(td))
+			ctrl.note_activity()  # mag geen exception geven
+			self.assertFalse(ctrl.tuning_active)
+
+	def test_default_watchdog_is_five_minutes(self) -> None:
+		"""Documenteer de huidige defaults zodat per ongeluk verlagen
+		een test-failure geeft in plaats van een veld-verrassing."""
+		self.assertEqual(TUNING_WATCHDOG_S, 300.0)
+
 	def test_shutdown_parks_when_rail_on(self) -> None:
 		with tempfile.TemporaryDirectory() as td:
 			ctrl, _, _ = _make_controller(Path(td))
@@ -252,6 +288,32 @@ class WatchdogTest(unittest.TestCase):
 			self.assertFalse(ctrl.tuning_active)
 			# Geen sleep gebeurd (we kwamen niet in park_all).
 			self.assertEqual(clock.sleeps, [])
+
+
+class HomeTest(unittest.TestCase):
+	def test_home_all_writes_center_us_and_keeps_rail_on(self) -> None:
+		with tempfile.TemporaryDirectory() as td:
+			ctrl, drv, _ = _make_controller(Path(td))
+			us1, us2 = ctrl.home_all()
+			self.assertEqual((us1, us2), (1500, 1600))
+			self.assertTrue(ctrl.rail_on)
+			self.assertIn(("rail", True), drv.calls)
+			self.assertIn(("pulse", 13, 1500), drv.calls)
+			self.assertIn(("pulse", 12, 1600), drv.calls)
+
+	def test_home_all_returns_none_when_center_missing(self) -> None:
+		with tempfile.TemporaryDirectory() as td:
+			ctrl, _, _ = _make_controller(Path(td), full_cal=False)
+			us1, us2 = ctrl.home_all()
+			self.assertEqual((us1, us2), (None, None))
+			self.assertTrue(ctrl.rail_on)  # rail wel aan, geen pulse geschreven
+
+	def test_home_all_refused_during_tuning(self) -> None:
+		with tempfile.TemporaryDirectory() as td:
+			ctrl, _, _ = _make_controller(Path(td))
+			ctrl.start_tuning(1)
+			with self.assertRaises(RuntimeError):
+				ctrl.home_all()
 
 
 class ClampTest(unittest.TestCase):

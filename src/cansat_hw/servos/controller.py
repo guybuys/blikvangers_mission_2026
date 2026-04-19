@@ -37,9 +37,12 @@ _HW_MAX_US = 2500
 # positie naar stowed te draaien (typische slew rate ~300°/s, range ~180°).
 PARK_WAIT_S = 0.8
 
-# Watchdog: hoe lang mag een tuning-sessie duren zonder save/stop? Voorkomt
-# dat een vergeten ``SERVO START`` de rail urenlang aan houdt (LiPo leeg).
-TUNING_WATCHDOG_S = 60.0
+# Watchdog: hoe lang mag een tuning-sessie inactief blijven (geen STEP/SET/MARK
+# /SEL/STATUS) voor we automatisch stoppen? Voorkomt dat een vergeten ``SERVO
+# START`` de rail urenlang aan houdt (LiPo leeg). 5 min is realistisch voor
+# handmatig hardware-tuning (operator stapt even weg, hangt mech. iets bij,
+# overlegt, …) en valt nog ruim binnen "veilig" voor de servo-rail.
+TUNING_WATCHDOG_S = 300.0
 
 # Kleine veilige stappen (small/big) — matcht ``scripts/gimbal/servo_calibration.py``.
 DEFAULT_STEP_US = 10
@@ -278,12 +281,23 @@ class ServoController:
 	# --- pulses --------------------------------------------------------------
 
 	def _write_pulse(self, idx: int, us: int) -> int:
-		"""Schrijf een pulse, met clamp op (cal-min/max) ∩ hardware-grenzen."""
+		"""Schrijf een pulse.
+
+		Tijdens een **tuning-sessie** passen we alleen de hardware-grenzen
+		(500..2500 µs) toe — de bestaande ``cal.min_us``/``cal.max_us`` mogen
+		het zoeken naar nieuwe grenzen niet beperken (anders zit je vast aan
+		de vorige calibratie en kun je de range nooit verruimen).
+
+		Buiten tuning (autonome stow/park, mission-runtime SET) gebruiken we
+		``cal.clamp(...)`` zodat een corrupte JSON of een mis-getypeerd pulse
+		nooit de servo door zijn mechanische einde duwt.
+		"""
 		cal = self._cal[idx]
-		clamped = cal.clamp(int(us))
-		# Extra hard-cap; clamp() respecteert al cal.min/max maar we vangen ook
-		# een corrupte JSON op die buiten 500..2500 µs zou willen schrijven.
-		clamped = max(_HW_MIN_US, min(_HW_MAX_US, clamped))
+		if self._tuning_active:
+			clamped = max(_HW_MIN_US, min(_HW_MAX_US, int(us)))
+		else:
+			clamped = cal.clamp(int(us))
+			clamped = max(_HW_MIN_US, min(_HW_MAX_US, clamped))
 		self._driver.set_pulse(cal.gpio, clamped)
 		self._current_us[idx] = clamped
 		return clamped
@@ -313,6 +327,41 @@ class ServoController:
 		self._sleep(self._park_wait_s)
 		self.disable_rail()
 		return had_stow and us1 is not None and us2 is not None
+
+	def home_all(self) -> Tuple[Optional[int], Optional[int]]:
+		"""Stuur beide servo's naar hun gekalibreerde ``center_us``.
+
+		Anders dan ``park_all`` blijft de **rail aan** zodat de servo's hun
+		center-positie actief vasthouden — handig voor een gimbal-test of
+		voor het visueel valideren van een nieuwe calibratie. Geeft
+		``(us1, us2)`` terug; ``None`` voor servo's zonder ``center_us``.
+		Niet bruikbaar tijdens een tuning-sessie (gebruik daar ``SERVO SET``).
+		"""
+		if self._tuning_active:
+			raise RuntimeError("home_all not allowed during tuning")
+		self.enable_rail()
+		out: Tuple[Optional[int], Optional[int]] = (None, None)
+		results: List[Optional[int]] = []
+		for idx in (1, 2):
+			cal = self._cal[idx]
+			if cal.center_us is None:
+				results.append(None)
+				continue
+			results.append(self._write_pulse(idx, int(cal.center_us)))
+		out = (results[0], results[1])
+		return out
+
+	# --- watchdog ------------------------------------------------------------
+
+	def note_activity(self) -> None:
+		"""Reset de tuning-watchdog. No-op buiten tuning.
+
+		Bedoeld om read-only commando's (zoals ``SERVO STATUS``) ook als
+		"de operator is wakker"-signaal te laten meetellen, zodat hij de
+		REPL kan refreshen zonder de servo's te moeten bewegen.
+		"""
+		if self._tuning_active:
+			self._touch_watchdog()
 
 	# --- tuning sub-state ----------------------------------------------------
 

@@ -919,8 +919,10 @@ def _handle_servo_cmd(
 		return _truncate(b"ERR SVO BAD")
 
 	sub = tokens[1].upper()
-	# STATUS overal toegestaan (read-only).
+	# STATUS overal toegestaan (read-only). Reset wel de tuning-watchdog
+	# zodat de operator de REPL kan refreshen zonder de servo's te bewegen.
 	if sub == "STATUS":
+		controller.note_activity()
 		return _format_servo_status(controller)
 
 	# Vanaf hier: alleen in CONFIG. Tijdens MISSION/TEST regelt de
@@ -945,6 +947,18 @@ def _handle_servo_cmd(
 		if not ok:
 			return _truncate(b"ERR SVO NOSTOW")
 		return _truncate(b"OK SVO PARK")
+	if sub == "HOME":
+		# Convenience: ENABLE → write center_us BOTH (rail blijft aan).
+		# Niet bruikbaar tijdens tuning (gebruik daar SET).
+		if controller.tuning_active:
+			return _truncate(b"ERR SVO TUNON")
+		try:
+			us1, us2 = controller.home_all()
+		except RuntimeError as e:
+			return _truncate(("ERR SVO %s" % e).encode("utf-8", errors="replace"))
+		if us1 is None or us2 is None:
+			return _truncate(b"ERR SVO NOCEN")
+		return _truncate(("OK SVO HOME US1=%d US2=%d" % (us1, us2)).encode("utf-8"))
 	if sub == "STOW":
 		# Manual stow: vereist actieve rail; geen wait/disable hier.
 		if not controller.rail_on:
