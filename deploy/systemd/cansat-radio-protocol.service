@@ -31,10 +31,15 @@ Environment=GPIOZERO_PIN_FACTORY=rpigpio
 # ``/home/icw/photos``) — we maken daarom de juiste user-map en chmod'en die.
 ExecStartPre=/bin/mkdir -p /home/icw/photos
 ExecStartPre=/bin/chown icw:icw /home/icw/photos
+# Idem voor de binary log-map (cansat_continuous.bin + per-sessie *.bin).
+# Zonder dit zou Path.home() onder root resolveren naar /root/cansat_logs/
+# en zou icw die files niet zonder sudo kunnen lezen.
+ExecStartPre=/bin/mkdir -p /home/icw/cansat_logs
+ExecStartPre=/bin/chown icw:icw /home/icw/cansat_logs
 # Pas --freq / --node / --dest / pins aan jullie hardware aan.
 # --freq is enkel fallback: zodra de Pico ``SET FREQ`` heeft gedaan, staat
 # ``config/radio_runtime.json`` op beide kanten in sync.
-ExecStart=/home/icw/cansat_mission_2026/.venv/bin/python scripts/cansat_radio_protocol.py --verbose --poll 1.0 --reply-delay 0.08 --photo-dir /home/icw/photos --bme280-addr 0x77
+ExecStart=/home/icw/cansat_mission_2026/.venv/bin/python scripts/cansat_radio_protocol.py --verbose --poll 1.0 --reply-delay 0.08 --photo-dir /home/icw/photos --log-dir /home/icw/cansat_logs --bme280-addr 0x77
 Restart=on-failure
 RestartSec=5
 
