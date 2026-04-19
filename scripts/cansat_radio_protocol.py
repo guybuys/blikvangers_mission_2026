@@ -216,6 +216,18 @@ def main() -> int:
 		default=str(_DEFAULT_RUNTIME_PATH),
 		help="JSON-bestand waarin de laatst toegepaste frequentie wordt bewaard (sync met Pico)",
 	)
+	p.add_argument(
+		"--log-dir",
+		type=str,
+		default=str(Path.home() / "cansat_logs"),
+		help="Map voor binary log-files. cansat_continuous.bin staat altijd open; per "
+		"MISSION/TEST-sessie komt er cansat_<mode>_<UTC>.bin bij. Default: ~/cansat_logs",
+	)
+	p.add_argument(
+		"--no-log",
+		action="store_true",
+		help="Schakel binary logging uit (alleen radio-TX, geen .bin op de SD-kaart).",
+	)
 	args = p.parse_args()
 	if args.reply_delay < 0:
 		print("--reply-delay must be >= 0", file=sys.stderr)
@@ -303,6 +315,7 @@ def main() -> int:
 		test_mode_end,
 		test_mode_tick,
 	)
+	from cansat_hw.telemetry import LogManager
 
 	rfm = RFM69(
 		spi_bus=args.spi_bus,
@@ -329,6 +342,10 @@ def main() -> int:
 		print(f"Geladen freq {persisted_freq} MHz uit {runtime_path}")
 		args.freq = persisted_freq
 		state.freq_set = True
+
+	log_manager = LogManager(args.log_dir, enabled=not args.no_log)
+	if log_manager.enabled and log_manager.continuous_path is not None:
+		print(f"Binary log → {log_manager.continuous_path}")
 
 	try:
 		rfm.frequency_mhz = args.freq
@@ -375,7 +392,14 @@ def main() -> int:
 						"ok=",
 						ok_evt,
 					)
+				# Log de EVT als losse payload (Pico/laptop kunnen 'm zo
+				# herleiden), dan pas mode_change zodat het nog in de TEST-
+				# sessie terechtkomt vóór die sluit.
+				log_manager.write_payload(evt)
+				old_mode = state.mode
 				test_mode_end(state)
+				if old_mode != state.mode:
+					log_manager.on_mode_change(old_mode, state.mode)
 				# Terug naar de responsieve CONFIG-IIR (bv. 4) zodat !alt weer
 				# snel reageert; test_mode_end heeft state.mode al op CONFIG gezet.
 				apply_mode_iir(state, bme280)
@@ -383,6 +407,7 @@ def main() -> int:
 				dest = state.test_dest_node if state.test_dest_node is not None else args.dest
 				tlm = build_telemetry_packet(state, bme280, bno055)
 				ok_tlm = rfm.send(tlm, keep_listening=True, destination=dest)
+				log_manager.write_payload(tlm)
 				if args.verbose:
 					print(
 						"TLM ->",
@@ -443,6 +468,13 @@ def main() -> int:
 				if args.verbose:
 					print("TEST: destination set to node", from_node)
 
+			# Mode-overgang doorgeven aan log writer zodat hij eventueel
+			# een nieuwe ``cansat_<mode>_<UTC>.bin`` opent of afsluit. We
+			# doen dit pas na een geslaagde TX zodat het log de werkelijk
+			# bevestigde state weerspiegelt.
+			if mode_before != state.mode and ok:
+				log_manager.on_mode_change(mode_before, state.mode)
+
 			if state.pending_freq_mhz is not None and ok:
 				new_freq = float(state.pending_freq_mhz)
 				state.pending_freq_mhz = None
@@ -475,6 +507,10 @@ def main() -> int:
 				bno055.close()
 			except Exception:
 				pass
+		try:
+			log_manager.close()
+		except Exception:  # noqa: BLE001
+			pass
 
 	return 0
 
