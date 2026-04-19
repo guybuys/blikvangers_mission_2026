@@ -64,7 +64,7 @@ else:
 	print("WARN: secrets.py niet gevonden — RFM69 draait met de publieke demo-key.")
 	print("      Zie secrets.example.py; kopieer naar secrets.py op de Pico.")
 
-REPLY_TIMEOUT_S = 4.0
+REPLY_TIMEOUT_S = 8.0
 # Korte pauze na eigen TX vóór RX — geeft de CanSat tijd om naar RX te gaan (half-duplex).
 REPLY_GAP_S = 0.05
 
@@ -737,9 +737,11 @@ def _send_and_wait_reply(wire_line: str):
 		_log_emit("ERR", wire_line, extra={"why": "payload-too-long"})
 		return
 	# Per-poging venster: deel REPLY_TIMEOUT_S over MAX_TX_ATTEMPTS, maar nooit
-	# minder dan 1.0 s (anders krijgt de Zero soms geen kans één TLM af te
-	# maken + te antwoorden).
-	per_try_s = max(1.0, float(REPLY_TIMEOUT_S) / float(MAX_TX_ATTEMPTS))
+	# minder dan 2.5 s. Sommige commando's (CAL GROUND doet 9 BME280-reads à
+	# ~225 ms bij OS=16 ⇒ ~2.0 s, plus reply-delay + radio-TX) hebben echt 2 s
+	# nodig; bij een te krap deelvenster zou élke try systematisch missen
+	# terwijl de Zero gewoon nog rustig aan het meten is.
+	per_try_s = max(2.5, float(REPLY_TIMEOUT_S) / float(MAX_TX_ATTEMPTS))
 	for attempt in range(MAX_TX_ATTEMPTS):
 		ok = rfm.send(payload, keep_listening=True)
 		if not ok:

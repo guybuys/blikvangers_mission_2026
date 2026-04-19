@@ -2,6 +2,10 @@
 
 Uitgebreidere notities en hardware-informatie. De **projectintro en installatie** staan in de [README op repository-niveau](../README.md).
 
+> **Onbekende afkorting tegengekomen?** Kijk eerst in de
+> **[woordenlijst & afkortingen](glossary.md)** — TLM, EVT, IMU, IIR,
+> `ground_hpa`, trigger-redenen, enz.
+
 ## Hardware & pinning
 
 - **[Raspberry Pi Zero 2 W — pinning & hardware](rpi_pinning.md)**  
@@ -13,6 +17,7 @@ Uitgebreidere notities en hardware-informatie. De **projectintro en installatie*
   Thonny, lokale `!`-commando’s, tekstregels naar de CanSat.
 - **CanSat (Zero 2 W):** `python scripts/cansat_radio_protocol.py` vanuit de repo-root (zie [project-README](../README.md)).
 - **[Radio-service (systemd) — bedienings-spiekbriefje](cansat_radio_service.md)** — start/stop, log volgen, herstarten, `STOP RADIO` vs `systemctl`, valkuilen bij autostart op de Zero.
+- **[Zero-logs ophalen, archiveren & decoderen](zero_logs.md)** — `scripts/fetch_zero_logs.sh` (rsync + journal + automatische decode), `scripts/decode_logs.py` (summary / CSV / raw), lokale layout `zero_logs/latest/` + `archive/<timestamp>/`, en hoe je snel state-transities, peak-altitude en peak-‖a‖ uit een sessie haalt.
 - **BME280 / BNO055 (I²C):** `python scripts/bme280_test.py` / `python scripts/bno055_test.py` (`pip install smbus2` of `pip install -e ".[sensors]"`). Over de radio in CONFIG: `BME280` / `BNO055` (zie base station README).
 - **Gimbal (pigpio + calibratie-JSON):** [`scripts/gimbal/`](../scripts/gimbal/README.md) — calibratie in `config/gimbal/`; niveauregeling o.a. `scripts/gimbal_level.py` (BNO055 via smbus2).
 - **Camera (Picamera2 + AprilTag + logging):** [`scripts/camera/`](../scripts/camera/README.md) — `descent_telemetry.py`, `focus_preview.py`; demo-referentie in `zero_files/camera_project/`.
@@ -25,6 +30,11 @@ Uitgebreidere notities en hardware-informatie. De **projectintro en installatie*
   Wat detecteert `ASCENT` / `DEPLOY` / `LAND` precies, welke sensor, wat zijn zinvolle waarden en hoe stel je ze in vanaf de Pico (`SET TRIGGER …`, `GET TRIGGERS`, `PREFLIGHT`).
 - **[Geheimen & lokale configuratie](secrets.md)**  
   `.env` op de Zero, `secrets.py` op de Pico, `.env.example` / `secrets.example.py` als template. Wat is écht geheim en hoe hou je Pico en Zero op dezelfde AES-sleutel.
+
+## Referentie
+
+- **[Planning & roadmap](planning.md)** — wat is af, wat ligt op de plank, wat staat eerstvolgend op de agenda. **Bij te werken in dezelfde commit als feature-merges**, anders loopt het uit de pas met de werkelijkheid.
+- **[Woordenlijst & afkortingen](glossary.md)** — centrale glossary voor TLM/EVT/HDR/CRC, `mode_state`, sensor-termen (BME280/BNO055/IMU/IIR), trigger-redenen, en alle andere jargon die in de losse documenten terugkomt.
 
 ## Later uit te breiden
 

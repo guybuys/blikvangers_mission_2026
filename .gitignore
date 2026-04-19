@@ -26,6 +26,10 @@ secrets.py
 .coverage
 htmlcov/
 
+# Alle data die van de Zero komt (binary logs + journal + decoded CSV's).
+# Wordt gevuld door scripts/fetch_zero_logs.sh.
+zero_logs/
+
 # Zero-only runtime data (mag NOOIT vanaf Mac gepushed worden — zou de
 # persistente RFM69-frequentie wissen en beide kanten op default 433 MHz
 # zetten waarna ze niet meer met elkaar kunnen praten).
