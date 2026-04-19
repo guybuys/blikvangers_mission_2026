@@ -199,10 +199,14 @@ def _parse_reply(text):
 		}
 	if parts[0] == "EVT" and len(parts) >= 3 and parts[1] == "STATE":
 		# Ongevraagde flight-state-overgang in MISSION (Fase 8). Bv.
-		# ``EVT STATE ASCENT`` of ``EVT STATE LANDED``.
+		# ``EVT STATE ASCENT`` (Fase 8) of ``EVT STATE ASCENT ACC`` (Fase 8b
+		# multi-trigger). De reason is optioneel zodat oude logs en oude
+		# Zero-firmware blijven werken; wanneer aanwezig is hij één van
+		# ACC/ALT/FREEFALL/SHOCK/DESCENT/IMPACT/STABLE.
 		return {
 			"kind": "EVT_STATE",
 			"state": parts[2],
+			"reason": parts[3] if len(parts) >= 4 else None,
 		}
 	if parts[0] != "OK" or len(parts) < 2:
 		return None

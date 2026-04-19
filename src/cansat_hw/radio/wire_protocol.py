@@ -42,6 +42,28 @@ _TIME_SANE_MIN = 1_735_689_600  # 2025-01-01 UTC
 DEFAULT_ASCENT_HEIGHT_M = 5.0
 DEFAULT_DEPLOY_DESCENT_M = 3.0
 DEFAULT_LAND_HZ_M = 5.0
+
+# IMU-trigger defaults (Fase 8b). Aanvullend op de altitude-backup-drempels
+# hierboven: de raket levert de eerste seconden na ontsteking veel acceleratie,
+# dan vrije val tot parachute-open, en bij landing een impact-spike.
+#
+#   - ASCENT-ACC: peak ‖a_lin‖ tijdens motor-burn ligt typisch op 5–15 g voor
+#     een hobby-raket. 3 g geeft margebij wind/handling-ruis maar wordt niet
+#     bereikt door op de tafel zwaaien.
+#   - DEPLOY-FREEFALL: na motor-burnout daalt ‖a_lin‖ snel naar 0 g. Een halve
+#     seconde aanhoudende vrije val geeft genoeg zekerheid om parachute uit te
+#     gooien (~5 m valdiepte).
+#   - DEPLOY-SHOCK: parachute-snap zelf is ook detectabel (>5 g jerk); dient
+#     als 2e backup naast freefall en altitude-descent.
+#   - LAND-IMPACT: impact-piek bij touchdown (asfalt/gras geeft ~10–30 g, gras
+#     ~5–10 g). 8 g balanceert detectie versus false positives door turbulentie.
+#   - LAND-STABLE: 5 s zonder hoogteverandering ⇒ rust gevonden — fail-safe
+#     voor zachte landingen die de impact-drempel niet halen.
+DEFAULT_ASCENT_ACC_G = 3.0
+DEFAULT_DEPLOY_FREEFALL_S = 0.5
+DEFAULT_DEPLOY_SHOCK_G = 5.0
+DEFAULT_LAND_IMPACT_G = 8.0
+DEFAULT_LAND_STABLE_S = 5.0
 PREFLIGHT_MIN_FREE_MB = 500
 PREFLIGHT_BNO_SYS_MIN = 1
 # CAL GROUND: eerst ``state.alt_prime_samples`` warm-up reads om het IIR-filter
@@ -124,6 +146,13 @@ class RadioRuntimeState:
 	trig_ascent_height_m: float = DEFAULT_ASCENT_HEIGHT_M
 	trig_deploy_descent_m: float = DEFAULT_DEPLOY_DESCENT_M
 	trig_land_hz_m: float = DEFAULT_LAND_HZ_M
+	# Fase 8b: IMU-triggers (primair); altitude/descent/hz zijn de backup.
+	# Gebruikt door :func:`evaluate_flight_state` met OR-logica per transitie.
+	trig_ascent_accel_g: float = DEFAULT_ASCENT_ACC_G
+	trig_deploy_freefall_s: float = DEFAULT_DEPLOY_FREEFALL_S
+	trig_deploy_shock_g: float = DEFAULT_DEPLOY_SHOCK_G
+	trig_land_impact_g: float = DEFAULT_LAND_IMPACT_G
+	trig_land_stable_s: float = DEFAULT_LAND_STABLE_S
 	# Apogee-tracking (hoogste hoogte sinds laatste RESET APOGEE).
 	max_alt_m: Optional[float] = None
 	min_pressure_hpa: Optional[float] = None
@@ -160,6 +189,12 @@ class RadioRuntimeState:
 	# (bv. SET MODE MISSION → PAD_IDLE) wordt de EVT verzonden en deze
 	# gelijkgetrokken aan ``flight_state``.
 	last_announced_flight_state: int = field(default=STATE_NONE, repr=False)
+	# Laatste reden waarom de state transities maakte (Fase 8b). ``None`` bij
+	# boot of na een SET STATE-handmatige transitie. De main loop pikt deze op
+	# om mee te sturen in ``EVT STATE <NAME> <REASON>``; daarna mag het veld
+	# blijven staan tot de volgende transitie 'm overschrijft (handig voor
+	# diagnose via GET STATE).
+	last_transition_reason: Optional[str] = field(default=None, repr=False)
 
 	def __post_init__(self) -> None:
 		# Sync flight_state met mode tenzij de aanroeper expliciet een andere
@@ -194,57 +229,129 @@ def _reset_apogee(state: RadioRuntimeState) -> None:
 	state.max_alt_ts = None
 
 
-# --- Flight-state machine (Fase 8) -------------------------------------------
-# Eén-richting machine die alleen actief is in MISSION. De drempels komen uit
-# ``state.trig_*``-velden (in meters), die team via SET TRIGGER kan tunen.
-# Geen hysteresis: BME280 met IIR×16 in MISSION (~2 cm σ) is al ruim stiller
-# dan de praktische 0.5 m-ondergrens van de drempels — overshoot is dus geen
-# realistisch risico voor de overgangsregels hieronder.
-def evaluate_flight_state(state: RadioRuntimeState, current_alt_m: float) -> int:
-	"""Bereken de volgende ``flight_state`` op basis van ``current_alt_m``.
+# --- Flight-state machine (Fase 8 + 8b) --------------------------------------
+# Eén-richting machine die alleen actief is in MISSION. Per transitie hebben we
+# **OR-logica met meerdere triggers**: IMU-signalen (primair, snel, betrouwbaar
+# tijdens de motor-burn / vrije val / impact) én altitude-/descent-/at-rest-
+# backups. Zo komen we toch in DEPLOYED als de IMU-trigger faalt — kritisch
+# omdat we maar één lancering hebben.
+#
+# Conventie van de **reason-string** in EVT STATE / log-records:
+#
+#   ASCENT    : "ACC"       (peak ‖a_lin‖ ≥ trig_ascent_accel_g)
+#               "ALT"       (alt_m ≥ trig_ascent_height_m, backup)
+#   DEPLOYED  : "FREEFALL"  (vrije val ≥ trig_deploy_freefall_s)
+#               "SHOCK"     (peak ‖a‖ ≥ trig_deploy_shock_g, parachute-snap)
+#               "DESCENT"   (max_alt − alt ≥ trig_deploy_descent_m, backup)
+#   LANDED    : "IMPACT"    (peak ‖a‖ ≥ trig_land_impact_g)
+#               "STABLE"    (alt_stable_for_s ≥ trig_land_stable_s)
+#               "ALT"       (alt_m ≤ trig_land_hz_m, backup)
+#
+# Volgorde van checks per transitie = volgorde waarin de reason wordt
+# gerapporteerd (eerst IMU, dan backup) — als beide tegelijk waar zijn winnen
+# de IMU-redenen.
 
-	Werkt enkel binnen MISSION; in andere modes geeft deze functie de huidige
-	state ongewijzigd terug zodat de aanroeper veilig overal kan callen.
-	Transities zijn strikt vooruit; een zijwaartse of achterwaartse beweging
-	van de hoogte triggert geen rollback.
+# Sentinel voor backwards-compat: ``evaluate_flight_state(state, alt_m)`` mag
+# nog gewoon een float meekrijgen (oude callers). Intern wrappen we dat dan in
+# een minimal "alleen alt"-snapshot view zodat de IMU-checks falen (None) en
+# alleen de backup-altitudechecks meedoen.
+class _AltOnlyView:
+	"""Read-only view die alleen ``alt_m`` invult; alle IMU-velden = None."""
+
+	def __init__(self, alt_m: Optional[float]) -> None:
+		self.alt_m = alt_m
+		self.peak_accel_g = None
+		self.freefall_for_s = 0.0
+		self.alt_stable_for_s = 0.0
+
+
+def _coerce_snapshot(arg: object) -> object:
+	"""Accepteer zowel ``SensorSnapshot`` als rauwe float (oud callsignature)."""
+
+	if isinstance(arg, (int, float)):
+		return _AltOnlyView(float(arg))
+	if arg is None:
+		return _AltOnlyView(None)
+	return arg
+
+
+def evaluate_flight_state(
+	state: RadioRuntimeState, snap_or_alt: object
+) -> Tuple[int, Optional[str]]:
+	"""Bereken (next_state, reason).
+
+	``snap_or_alt`` mag een :class:`SensorSnapshot` zijn (volledige multi-
+	trigger evaluatie) **of** een float (alleen altitude — backwards compat
+	voor callers die nog geen sampler hebben gepland).
+
+	``reason`` is ``None`` als er geen transitie nodig is; anders één van de
+	strings beschreven boven (bv. ``"ACC"``, ``"FREEFALL"``).
 	"""
+
 	cur = int(state.flight_state)
 	if state.mode != "MISSION":
-		return cur
+		return cur, None
+
+	snap = _coerce_snapshot(snap_or_alt)
+	alt_m = getattr(snap, "alt_m", None)
+	peak_g = getattr(snap, "peak_accel_g", None)
+	freefall_s = float(getattr(snap, "freefall_for_s", 0.0) or 0.0)
+	stable_s = float(getattr(snap, "alt_stable_for_s", 0.0) or 0.0)
 
 	if cur == STATE_PAD_IDLE:
-		if float(current_alt_m) >= float(state.trig_ascent_height_m):
-			return STATE_ASCENT
-		return cur
+		# IMU-primair: motor-burn -> piek-acceleratie. Backup: hoogte-drempel.
+		if peak_g is not None and float(peak_g) >= float(state.trig_ascent_accel_g):
+			return STATE_ASCENT, "ACC"
+		if alt_m is not None and float(alt_m) >= float(state.trig_ascent_height_m):
+			return STATE_ASCENT, "ALT"
+		return cur, None
 
 	if cur == STATE_ASCENT:
-		if state.max_alt_m is not None:
-			descent = float(state.max_alt_m) - float(current_alt_m)
+		# IMU-primair: vrije val (motor uit) of plotse jerk (parachute).
+		# Backup: descent vanaf apogee.
+		if freefall_s >= float(state.trig_deploy_freefall_s):
+			return STATE_DEPLOYED, "FREEFALL"
+		if peak_g is not None and float(peak_g) >= float(state.trig_deploy_shock_g):
+			return STATE_DEPLOYED, "SHOCK"
+		if state.max_alt_m is not None and alt_m is not None:
+			descent = float(state.max_alt_m) - float(alt_m)
 			if descent >= float(state.trig_deploy_descent_m):
-				return STATE_DEPLOYED
-		return cur
+				return STATE_DEPLOYED, "DESCENT"
+		return cur, None
 
 	if cur == STATE_DEPLOYED:
-		# LANDED: terug binnen ``trig_land_hz_m`` boven (of zelfs onder) grond.
-		# We nemen <= zodat een hoogte van precies de drempel ook al telt.
-		if float(current_alt_m) <= float(state.trig_land_hz_m):
-			return STATE_LANDED
-		return cur
+		# IMU-primair: impact-spike of langdurige rust.
+		# Backup: terug binnen trig_land_hz_m boven grond.
+		if peak_g is not None and float(peak_g) >= float(state.trig_land_impact_g):
+			return STATE_LANDED, "IMPACT"
+		if stable_s >= float(state.trig_land_stable_s):
+			return STATE_LANDED, "STABLE"
+		if alt_m is not None and float(alt_m) <= float(state.trig_land_hz_m):
+			return STATE_LANDED, "ALT"
+		return cur, None
 
-	return cur
+	return cur, None
 
 
-def maybe_advance_flight_state(state: RadioRuntimeState, current_alt_m: float) -> bool:
-	"""Voer één state-machine-stap uit; retourneer True als de state veranderd is.
+def maybe_advance_flight_state(
+	state: RadioRuntimeState, snap_or_alt: object
+) -> Optional[str]:
+	"""Voer één state-machine-stap uit; retourneer ``reason`` bij transitie.
 
-	Veilig om altijd te callen: buiten MISSION blijft de state staan zoals hij
-	was (bv. ``DEPLOYED`` in TEST, ``NONE`` in CONFIG).
+	Returns:
+		``None`` als de state niet veranderd is, anders de **reden-string**
+		(bv. ``"ACC"``, ``"FREEFALL"``, ``"IMPACT"``). Caller kan die meegeven
+		aan EVT STATE en log-record.
+
+	Backwards compat: ``snap_or_alt`` mag een float zijn (alleen altitude).
 	"""
-	new = evaluate_flight_state(state, current_alt_m)
+
+	new, reason = evaluate_flight_state(state, snap_or_alt)
 	if new != int(state.flight_state):
 		state.flight_state = int(new)
-		return True
-	return False
+		state.last_transition_reason = reason
+		return reason
+	return None
 
 
 def _truncate(msg: bytes) -> bytes:
@@ -494,6 +601,7 @@ def build_telemetry_packet(
 	bme280: Any,
 	bno055: Any,
 	*,
+	snapshot: Optional[Any] = None,
 	now_monotonic: Optional[float] = None,
 	tags: Optional[List[TagDetection]] = None,
 ) -> bytes:
@@ -502,6 +610,16 @@ def build_telemetry_packet(
 	Layout en sentinels: zie :mod:`cansat_hw.telemetry.codec`. Het
 	``mode_state``-byte wordt afgeleid uit ``state.mode``; de flight-state
 	is voorlopig een vaste mapping per mode (Fase 8 zal die dynamisch maken).
+
+	Twee data-bronnen worden ondersteund:
+
+	1. **``snapshot=...``** (Fase 7+8b): ``SensorSnapshot`` van een actieve
+	   :class:`~cansat_hw.sensors.sampler.SensorSampler`. Geen extra sensor-
+	   I/O hier; de state-machine krijgt de hele snapshot zodat IMU-triggers
+	   (peak ‖a‖, freefall, alt-stable) meedoen.
+	2. **``bme280`` / ``bno055`` direct** (legacy): valt terug op één-shot
+	   reads zoals vóór Fase 7. De state-machine krijgt dan alleen ``alt_m``
+	   en gebruikt enkel de altitude-backup-triggers.
 
 	De aanroeper (de radio-loop) is verantwoordelijk voor het zenden; deze
 	functie heeft géén radio-IO. ``state.tlm_seq`` wordt opgehoogd zodat
@@ -526,20 +644,6 @@ def build_telemetry_packet(
 	alt_m: Optional[float] = None
 	p_hpa: Optional[float] = None
 	t_c: Optional[float] = None
-	if bme280 is not None:
-		try:
-			t_read, p_read, _ = bme280.read()
-			p_hpa = float(p_read)
-			t_c = float(t_read)
-			if state.ground_hpa is not None:
-				alt_m = pressure_to_altitude_m(p_hpa, float(state.ground_hpa))
-				_update_apogee(state, alt_m, p_hpa)
-				# Voed de flight-state-machine vanuit de TLM-loop. Geen-op
-				# buiten MISSION (TEST blijft DEPLOYED, CONFIG blijft NONE).
-				maybe_advance_flight_state(state, alt_m)
-		except Exception:  # noqa: BLE001
-			alt_m = p_hpa = t_c = None
-
 	heading: Optional[float] = None
 	roll: Optional[float] = None
 	pitch: Optional[float] = None
@@ -550,27 +654,61 @@ def build_telemetry_packet(
 	gyro_cal: Optional[int] = None
 	accel_cal: Optional[int] = None
 	mag_cal: Optional[int] = None
-	if bno055 is not None:
-		try:
-			heading, roll, pitch = bno055.read_euler()
-		except Exception:  # noqa: BLE001
-			heading = roll = pitch = None
-		# Linear acceleration (m/s², zwaartekracht eruit) -> g voor TLM.
-		try:
-			ax_ms2, ay_ms2, az_ms2 = bno055.read_linear_acceleration()
-			ax_g = float(ax_ms2) / _G_MS2
-			ay_g = float(ay_ms2) / _G_MS2
-			az_g = float(az_ms2) / _G_MS2
-		except Exception:  # noqa: BLE001
-			ax_g = ay_g = az_g = None
-		try:
-			cs = bno055.calibration_status()
-			sys_cal = int(cs[0])
-			gyro_cal = int(cs[1])
-			accel_cal = int(cs[2])
-			mag_cal = int(cs[3])
-		except Exception:  # noqa: BLE001
-			sys_cal = gyro_cal = accel_cal = mag_cal = None
+
+	if snapshot is not None:
+		# Fase 7-pad: lees alles uit de snapshot. Geen extra sensor I/O — de
+		# sampler heeft al getikt in de main loop voordat we hier komen.
+		alt_m = getattr(snapshot, "alt_m", None)
+		p_hpa = getattr(snapshot, "pressure_hpa", None)
+		t_c = getattr(snapshot, "temp_c", None)
+		heading = getattr(snapshot, "heading_deg", None)
+		roll = getattr(snapshot, "roll_deg", None)
+		pitch = getattr(snapshot, "pitch_deg", None)
+		ax_g = getattr(snapshot, "ax_g", None)
+		ay_g = getattr(snapshot, "ay_g", None)
+		az_g = getattr(snapshot, "az_g", None)
+		sys_cal = getattr(snapshot, "sys_cal", None)
+		gyro_cal = getattr(snapshot, "gyro_cal", None)
+		accel_cal = getattr(snapshot, "accel_cal", None)
+		mag_cal = getattr(snapshot, "mag_cal", None)
+		if alt_m is not None and p_hpa is not None:
+			_update_apogee(state, float(alt_m), float(p_hpa))
+		# Volle multi-trigger evaluatie. Geen-op buiten MISSION.
+		maybe_advance_flight_state(state, snapshot)
+	else:
+		# Legacy-pad: één-shot sensor reads.
+		if bme280 is not None:
+			try:
+				t_read, p_read, _ = bme280.read()
+				p_hpa = float(p_read)
+				t_c = float(t_read)
+				if state.ground_hpa is not None:
+					alt_m = pressure_to_altitude_m(p_hpa, float(state.ground_hpa))
+					_update_apogee(state, alt_m, p_hpa)
+					maybe_advance_flight_state(state, alt_m)
+			except Exception:  # noqa: BLE001
+				alt_m = p_hpa = t_c = None
+
+		if bno055 is not None:
+			try:
+				heading, roll, pitch = bno055.read_euler()
+			except Exception:  # noqa: BLE001
+				heading = roll = pitch = None
+			try:
+				ax_ms2, ay_ms2, az_ms2 = bno055.read_linear_acceleration()
+				ax_g = float(ax_ms2) / _G_MS2
+				ay_g = float(ay_ms2) / _G_MS2
+				az_g = float(az_ms2) / _G_MS2
+			except Exception:  # noqa: BLE001
+				ax_g = ay_g = az_g = None
+			try:
+				cs = bno055.calibration_status()
+				sys_cal = int(cs[0])
+				gyro_cal = int(cs[1])
+				accel_cal = int(cs[2])
+				mag_cal = int(cs[3])
+			except Exception:  # noqa: BLE001
+				sys_cal = gyro_cal = accel_cal = mag_cal = None
 
 	# Onderdrukkingsregel om Lint-noise (now_monotonic ongebruikt) weg te krijgen.
 	# Hij is hier voor consistentie met de rest van de mode-loop én voor
@@ -955,7 +1093,48 @@ def handle_wire_line(
 			return b"ERR BAD TRIGGER"
 		return _truncate(("OK TRIG %s %.2f%s" % (which, v, unit)).encode("utf-8"))
 
+	# Fase 8b — multi-trigger SET TRIG <STATE> <FIELD> <VAL>. Naast de oude
+	# ``SET TRIGGER ASCENT/DEPLOY/LAND <m>`` (alt-only) kunnen we nu ook IMU-
+	# drempels tunen. Compact 5-token-formaat houdt het binnen één RFM69-frame.
+	#
+	#   SET TRIG ASC HEIGHT 5.0     -> trig_ascent_height_m
+	#   SET TRIG ASC ACC    3.0     -> trig_ascent_accel_g
+	#   SET TRIG DEP DESCENT 3.0    -> trig_deploy_descent_m
+	#   SET TRIG DEP SHOCK   5.0    -> trig_deploy_shock_g
+	#   SET TRIG DEP FREEFALL 0.5   -> trig_deploy_freefall_s
+	#   SET TRIG LND ALT     5.0    -> trig_land_hz_m
+	#   SET TRIG LND IMPACT  8.0    -> trig_land_impact_g
+	#   SET TRIG LND STABLE  5.0    -> trig_land_stable_s
+	if len(tokens) == 5 and tokens[0].upper() == "SET" and tokens[1].upper() == "TRIG":
+		st_name = tokens[2].upper()
+		field_name = tokens[3].upper()
+		try:
+			v = float(tokens[4])
+		except ValueError:
+			return b"ERR BAD TRIG"
+		# Tabel (state, field) -> (attr, range, unit, fmt)
+		field_map = {
+			("ASC", "HEIGHT"): ("trig_ascent_height_m", (0.5, 1000.0), "m", "%.2f"),
+			("ASC", "ACC"): ("trig_ascent_accel_g", (0.5, 20.0), "g", "%.2f"),
+			("DEP", "DESCENT"): ("trig_deploy_descent_m", (0.5, 100.0), "m", "%.2f"),
+			("DEP", "SHOCK"): ("trig_deploy_shock_g", (1.0, 20.0), "g", "%.2f"),
+			("DEP", "FREEFALL"): ("trig_deploy_freefall_s", (0.05, 10.0), "s", "%.2f"),
+			("LND", "ALT"): ("trig_land_hz_m", (0.5, 500.0), "m", "%.2f"),
+			("LND", "IMPACT"): ("trig_land_impact_g", (1.0, 30.0), "g", "%.2f"),
+			("LND", "STABLE"): ("trig_land_stable_s", (1.0, 60.0), "s", "%.2f"),
+		}
+		entry = field_map.get((st_name, field_name))
+		if entry is None:
+			return b"ERR BAD TRIG"
+		attr, (lo, hi), unit, fmt = entry
+		if not (lo <= v <= hi):
+			return b"ERR BAD TRIG"
+		setattr(state, attr, v)
+		msg = ("OK TRIG %s %s " + fmt + "%s") % (st_name, field_name, v, unit)
+		return _truncate(msg.encode("utf-8"))
+
 	if su == "GET TRIGGERS":
+		# Compacte alt-only weergave (back-compat met oude operator-tools).
 		if state.ground_hpa is not None:
 			dp = height_m_to_dp_hpa(state.trig_ascent_height_m, state.ground_hpa)
 			asc_str = "ASC=%.1fm/%.2fhPa" % (state.trig_ascent_height_m, dp)
@@ -965,6 +1144,24 @@ def handle_wire_line(
 			asc_str,
 			state.trig_deploy_descent_m,
 			state.trig_land_hz_m,
+		)
+		return _truncate(msg.encode("utf-8"))
+
+	# Volledige (multi-trigger) weergave; past nét binnen 60 B als float-formats
+	# kort blijven. Bewust een apart commando zodat ``GET TRIGGERS`` de oude
+	# vorm behoudt en bestaande tooling niet stuk gaat.
+	if su == "GET TRIG ALL":
+		msg = (
+			"OK TRIG A=%.1fm/%.1fg D=%.1fm/%.1fg/%.1fs L=%.1fm/%.1fg/%.1fs"
+		) % (
+			state.trig_ascent_height_m,
+			state.trig_ascent_accel_g,
+			state.trig_deploy_descent_m,
+			state.trig_deploy_shock_g,
+			state.trig_deploy_freefall_s,
+			state.trig_land_hz_m,
+			state.trig_land_impact_g,
+			state.trig_land_stable_s,
 		)
 		return _truncate(msg.encode("utf-8"))
 

@@ -1406,5 +1406,322 @@ class MissionTlmLoopTest(unittest.TestCase):
 		self.assertEqual(st.flight_state, STATE_DEPLOYED)
 
 
+class _SnapStub:
+	"""Lichte ``SensorSnapshot``-look-alike voor multi-trigger tests.
+
+	We willen niet de echte :class:`cansat_hw.sensors.sampler.SensorSnapshot`
+	importeren want dan zit er een sampler-import-cycle in deze tests; de
+	state-machine leest enkel ``alt_m``, ``peak_accel_g``, ``freefall_for_s``
+	en ``alt_stable_for_s`` via ``getattr``.
+	"""
+
+	def __init__(
+		self,
+		*,
+		alt_m=None,
+		peak_accel_g=None,
+		freefall_for_s=0.0,
+		alt_stable_for_s=0.0,
+	):
+		self.alt_m = alt_m
+		self.peak_accel_g = peak_accel_g
+		self.freefall_for_s = freefall_for_s
+		self.alt_stable_for_s = alt_stable_for_s
+
+
+class MultiTriggerStateMachineTest(unittest.TestCase):
+	"""Fase 8b — IMU-primair + altitude/descent/at-rest backups."""
+
+	def _mission_state(self):
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState
+
+		st = RadioRuntimeState(mode="MISSION")
+		st.ground_hpa = 1013.25
+		return st
+
+	# --- PAD_IDLE -> ASCENT --------------------------------------------------
+
+	def test_ascent_via_acc_trigger(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_ASCENT
+
+		st = self._mission_state()
+		st.trig_ascent_accel_g = 3.0
+		# Net onder.
+		self.assertIsNone(
+			maybe_advance_flight_state(st, _SnapStub(peak_accel_g=2.9, alt_m=0.0))
+		)
+		# Op de drempel.
+		reason = maybe_advance_flight_state(
+			st, _SnapStub(peak_accel_g=3.0, alt_m=0.0)
+		)
+		self.assertEqual(reason, "ACC")
+		self.assertEqual(st.flight_state, STATE_ASCENT)
+		self.assertEqual(st.last_transition_reason, "ACC")
+
+	def test_ascent_via_alt_backup(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_ASCENT
+
+		st = self._mission_state()
+		st.trig_ascent_height_m = 5.0
+		# IMU stil maar boven hoogte-drempel.
+		reason = maybe_advance_flight_state(
+			st, _SnapStub(peak_accel_g=0.1, alt_m=5.5)
+		)
+		self.assertEqual(reason, "ALT")
+		self.assertEqual(st.flight_state, STATE_ASCENT)
+
+	def test_acc_wins_over_alt_when_both_true(self) -> None:
+		"""IMU-trigger heeft voorrang in de reason-volgorde."""
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+
+		st = self._mission_state()
+		reason = maybe_advance_flight_state(
+			st, _SnapStub(peak_accel_g=10.0, alt_m=99.0)
+		)
+		self.assertEqual(reason, "ACC")
+
+	def test_no_trigger_when_both_below(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_PAD_IDLE
+
+		st = self._mission_state()
+		self.assertIsNone(
+			maybe_advance_flight_state(st, _SnapStub(peak_accel_g=1.0, alt_m=2.0))
+		)
+		self.assertEqual(st.flight_state, STATE_PAD_IDLE)
+
+	# --- ASCENT -> DEPLOYED --------------------------------------------------
+
+	def test_deploy_via_freefall(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_ASCENT, STATE_DEPLOYED
+
+		st = self._mission_state()
+		st.flight_state = STATE_ASCENT
+		st.trig_deploy_freefall_s = 0.5
+		# Net niet lang genoeg in vrije val.
+		self.assertIsNone(
+			maybe_advance_flight_state(
+				st, _SnapStub(freefall_for_s=0.49, peak_accel_g=0.1)
+			)
+		)
+		# Voorbij drempel.
+		reason = maybe_advance_flight_state(
+			st, _SnapStub(freefall_for_s=0.5, peak_accel_g=0.1)
+		)
+		self.assertEqual(reason, "FREEFALL")
+		self.assertEqual(st.flight_state, STATE_DEPLOYED)
+
+	def test_deploy_via_shock(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_ASCENT, STATE_DEPLOYED
+
+		st = self._mission_state()
+		st.flight_state = STATE_ASCENT
+		st.trig_deploy_shock_g = 5.0
+		# Geen vrije val, maar plotse jerk (parachute-snap).
+		reason = maybe_advance_flight_state(
+			st, _SnapStub(freefall_for_s=0.0, peak_accel_g=6.0)
+		)
+		self.assertEqual(reason, "SHOCK")
+		self.assertEqual(st.flight_state, STATE_DEPLOYED)
+
+	def test_deploy_via_descent_backup(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_ASCENT
+
+		st = self._mission_state()
+		st.flight_state = STATE_ASCENT
+		st.max_alt_m = 100.0
+		st.trig_deploy_descent_m = 3.0
+		# IMU dood (None / 0); alleen altitude-backup beslist.
+		reason = maybe_advance_flight_state(
+			st,
+			_SnapStub(peak_accel_g=None, freefall_for_s=0.0, alt_m=96.5),
+		)
+		self.assertEqual(reason, "DESCENT")
+
+	def test_deploy_freefall_wins_over_shock(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_ASCENT
+
+		st = self._mission_state()
+		st.flight_state = STATE_ASCENT
+		st.max_alt_m = 100.0
+		# Allebei waar -> freefall (eerste check) wint.
+		reason = maybe_advance_flight_state(
+			st,
+			_SnapStub(freefall_for_s=10.0, peak_accel_g=99.0, alt_m=50.0),
+		)
+		self.assertEqual(reason, "FREEFALL")
+
+	# --- DEPLOYED -> LANDED --------------------------------------------------
+
+	def test_land_via_impact(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_DEPLOYED, STATE_LANDED
+
+		st = self._mission_state()
+		st.flight_state = STATE_DEPLOYED
+		st.trig_land_impact_g = 8.0
+		reason = maybe_advance_flight_state(
+			st, _SnapStub(peak_accel_g=12.0, alt_m=20.0)
+		)
+		self.assertEqual(reason, "IMPACT")
+		self.assertEqual(st.flight_state, STATE_LANDED)
+
+	def test_land_via_stable(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_DEPLOYED
+
+		st = self._mission_state()
+		st.flight_state = STATE_DEPLOYED
+		st.trig_land_stable_s = 5.0
+		# Geen impact, hoogte boven LND-drempel, maar al lang stil.
+		reason = maybe_advance_flight_state(
+			st,
+			_SnapStub(peak_accel_g=0.05, alt_stable_for_s=5.5, alt_m=50.0),
+		)
+		self.assertEqual(reason, "STABLE")
+
+	def test_land_via_alt_backup(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_DEPLOYED
+
+		st = self._mission_state()
+		st.flight_state = STATE_DEPLOYED
+		st.trig_land_hz_m = 5.0
+		# IMU-triggers None / niet voldoende; alleen altitude-backup beslist.
+		reason = maybe_advance_flight_state(
+			st,
+			_SnapStub(peak_accel_g=0.1, alt_stable_for_s=0.0, alt_m=4.5),
+		)
+		self.assertEqual(reason, "ALT")
+
+	def test_land_impact_wins_over_stable(self) -> None:
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+
+		st = self._mission_state()
+		st.flight_state = STATE_DEPLOYED if False else __import__(
+			"cansat_hw.telemetry.codec", fromlist=["STATE_DEPLOYED"]
+		).STATE_DEPLOYED
+		# Allebei waar -> IMPACT (eerste check) wint.
+		reason = maybe_advance_flight_state(
+			st,
+			_SnapStub(peak_accel_g=99.0, alt_stable_for_s=99.0, alt_m=4.0),
+		)
+		self.assertEqual(reason, "IMPACT")
+
+	# --- Backwards compat ----------------------------------------------------
+
+	def test_backwards_compat_float_signature_uses_alt_only(self) -> None:
+		"""Oude callers die een rauwe float doorgeven moeten blijven werken."""
+		from cansat_hw.radio.wire_protocol import maybe_advance_flight_state
+		from cansat_hw.telemetry.codec import STATE_ASCENT
+
+		st = self._mission_state()
+		st.trig_ascent_height_m = 5.0
+		reason = maybe_advance_flight_state(st, 5.0)
+		self.assertEqual(reason, "ALT")
+		self.assertEqual(st.flight_state, STATE_ASCENT)
+
+
+class MultiTriggerWireCommandsTest(unittest.TestCase):
+	"""SET TRIG ASC|DEP|LND <FIELD> <VAL> + GET TRIG ALL."""
+
+	def test_set_trig_asc_acc(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "SET TRIG ASC ACC 4.5")
+		self.assertEqual(out, b"OK TRIG ASC ACC 4.50g")
+		self.assertAlmostEqual(st.trig_ascent_accel_g, 4.5)
+
+	def test_set_trig_asc_height(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "SET TRIG ASC HEIGHT 10")
+		self.assertEqual(out, b"OK TRIG ASC HEIGHT 10.00m")
+		self.assertAlmostEqual(st.trig_ascent_height_m, 10.0)
+
+	def test_set_trig_dep_freefall(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "SET TRIG DEP FREEFALL 0.8")
+		self.assertEqual(out, b"OK TRIG DEP FREEFALL 0.80s")
+		self.assertAlmostEqual(st.trig_deploy_freefall_s, 0.8)
+
+	def test_set_trig_lnd_impact(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "SET TRIG LND IMPACT 12")
+		self.assertEqual(out, b"OK TRIG LND IMPACT 12.00g")
+		self.assertAlmostEqual(st.trig_land_impact_g, 12.0)
+
+	def test_set_trig_lnd_stable(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "SET TRIG LND STABLE 7.5")
+		self.assertEqual(out, b"OK TRIG LND STABLE 7.50s")
+		self.assertAlmostEqual(st.trig_land_stable_s, 7.5)
+
+	def test_set_trig_out_of_range(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		# ACC max = 20 g.
+		self.assertEqual(
+			handle_wire_line(rfm, st, "SET TRIG ASC ACC 50"), b"ERR BAD TRIG"
+		)
+		# Field naam niet bestaand.
+		self.assertEqual(
+			handle_wire_line(rfm, st, "SET TRIG ASC FOO 1"), b"ERR BAD TRIG"
+		)
+
+	def test_set_trig_bad_value(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		self.assertEqual(
+			handle_wire_line(rfm, st, "SET TRIG ASC ACC abc"), b"ERR BAD TRIG"
+		)
+
+	def test_get_trig_all_includes_imu_and_alt(self) -> None:
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "GET TRIG ALL").decode("utf-8")
+		# Bevat A= (ASC), D= (DEP), L= (LND) en past binnen 60 B.
+		self.assertTrue(out.startswith("OK TRIG "))
+		self.assertIn("A=", out)
+		self.assertIn("D=", out)
+		self.assertIn("L=", out)
+		self.assertLessEqual(len(out), 60)
+
+	def test_old_set_trigger_ascent_still_works(self) -> None:
+		"""Oude single-token vorm mag niet breken."""
+		from cansat_hw.radio.wire_protocol import RadioRuntimeState, handle_wire_line
+
+		rfm = MagicMock()
+		st = RadioRuntimeState()
+		out = handle_wire_line(rfm, st, "SET TRIGGER ASCENT 7.5")
+		self.assertEqual(out, b"OK TRIG ASCENT 7.50m")
+		self.assertAlmostEqual(st.trig_ascent_height_m, 7.5)
+
+
 if __name__ == "__main__":
 	unittest.main()

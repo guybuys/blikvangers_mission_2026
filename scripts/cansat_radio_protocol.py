@@ -328,6 +328,7 @@ def main() -> int:
 		test_mode_end,
 		test_mode_tick,
 	)
+	from cansat_hw.sensors.sampler import SensorSampler
 	from cansat_hw.telemetry import LogManager, state_name
 
 	rfm = RFM69(
@@ -359,6 +360,12 @@ def main() -> int:
 	log_manager = LogManager(args.log_dir, enabled=not args.no_log)
 	if log_manager.enabled and log_manager.continuous_path is not None:
 		print(f"Binary log → {log_manager.continuous_path}")
+
+	# Continue sensor-sampler (Fase 7). We tikken hem in elke main-loop-iteratie
+	# zodat zowel TLM-builds als handle_wire_line altijd een verse snapshot
+	# zien — én zodat de IMU-rolling-windows (peak ‖a‖, freefall, alt-stable)
+	# voortdurend bijgewerkt blijven, ook als de Pico tijdelijk uit range is.
+	sampler = SensorSampler(bme280=bme280, bno055=bno055)
 
 	try:
 		rfm.frequency_mhz = args.freq
@@ -396,6 +403,11 @@ def main() -> int:
 			# MISSION is dit óók de motor van de flight-state-machine: zonder
 			# autonome TLM-reads beweegt PAD_IDLE → ASCENT → DEPLOYED → LANDED
 			# nooit (ook niet als de Pico tijdelijk uit range is).
+			# Eerst de sampler tikken: 1 BME-read + 1 BNO-read per iteratie.
+			# In MISSION/TEST is de loop ~5 Hz (rx_timeout 0.2s); in CONFIG
+			# ~1 Hz (args.poll). Dat is voldoende voor de IMU-rolling-stats —
+			# de echte IMU-triggers komen pas na lift-off in MISSION.
+			sampler.tick(ground_hpa=state.ground_hpa)
 			send_tlm, end_test = test_mode_tick(state)
 			if end_test:
 				dest = state.test_dest_node if state.test_dest_node is not None else args.dest
@@ -421,7 +433,9 @@ def main() -> int:
 				apply_mode_iir(state, bme280)
 			elif send_tlm:
 				dest = state.test_dest_node if state.test_dest_node is not None else args.dest
-				tlm = build_telemetry_packet(state, bme280, bno055)
+				tlm = build_telemetry_packet(
+					state, bme280, bno055, snapshot=sampler.snapshot
+				)
 				ok_tlm = rfm.send(tlm, keep_listening=True, destination=dest)
 				log_manager.write_payload(tlm)
 				if args.verbose:
@@ -519,23 +533,35 @@ def main() -> int:
 			if mode_before != state.mode and ok:
 				log_manager.on_mode_change(mode_before, state.mode)
 
-			# Flight-state-overgang? Stuur ongevraagd ``EVT STATE <NAME>``
-			# zodat het base station meteen kan reageren (UI, log). De
-			# state-machine zelf draait in ``handle_wire_line`` (GET ALT /
-			# READ BME280 in MISSION); hier publiceren we alleen het
-			# resultaat. ``last_announced_flight_state`` voorkomt herhaling.
+			# Flight-state-overgang? Stuur ongevraagd ``EVT STATE <NAME>
+			# [<REASON>]`` zodat het base station meteen kan reageren (UI,
+			# log). ``state.last_transition_reason`` is door de state-machine
+			# (multi-trigger Fase 8b) gezet en bevat ACC/ALT/FREEFALL/SHOCK/
+			# DESCENT/IMPACT/STABLE — zonder reden (None) sturen we de
+			# klassieke korte vorm zodat oude Pico-CLI-tools die ook
+			# nog parsen.
 			if state.flight_state != state.last_announced_flight_state:
 				dest_evt = (
 					state.test_dest_node
 					if state.test_dest_node is not None
 					else args.dest
 				)
-				evt_state = ("EVT STATE %s" % state_name(state.flight_state)).encode("utf-8")
+				name = state_name(state.flight_state)
+				reason = state.last_transition_reason
+				if reason:
+					evt_state = ("EVT STATE %s %s" % (name, reason)).encode("utf-8")
+				else:
+					evt_state = ("EVT STATE %s" % name).encode("utf-8")
 				ok_evt = rfm.send(evt_state, keep_listening=True, destination=dest_evt)
 				if args.verbose or not ok_evt:
 					print(
-						"STATE -> %s (dest=%d ok=%s)"
-						% (state_name(state.flight_state), dest_evt, ok_evt)
+						"STATE -> %s%s (dest=%d ok=%s)"
+						% (
+							name,
+							(" %s" % reason) if reason else "",
+							dest_evt,
+							ok_evt,
+						)
 					)
 				log_manager.write_payload(evt_state)
 				state.last_announced_flight_state = int(state.flight_state)
