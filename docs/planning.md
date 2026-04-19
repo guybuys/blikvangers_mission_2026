@@ -59,6 +59,34 @@ de pas met de werkelijkheid en wordt hij waardeloos.
 | Continue TLM-loop in `MISSION` (autonoom samplen + state advance, ook tussen Pico-commando's door) | [`scripts/cansat_radio_protocol.py`](../scripts/cansat_radio_protocol.py) |
 | Pico-CLI: retry-logic + 8s/2.5s timeouts + `OK STATE … REASON` parsing | [`basestation_cli.py`](../pico_files/Orginele%20cansat/RadioReceiver/basestation_cli.py) |
 
+### Fase 12 — Servo-tuning + park/stow via radio ✅
+
+| Onderdeel | Belangrijkste files |
+|---|---|
+| Pure helper voor rail-policy bij flight-state-overgangen (PARK / ENABLE / DISABLE / NONE) | [`src/cansat_hw/servos/state_policy.py`](../src/cansat_hw/servos/state_policy.py) |
+| `ServoController` met rail/pulse/stow/park, tuning sub-state, watchdog (60 s), JSON I/O incl. `stow_us`, dependency-injected driver | [`src/cansat_hw/servos/controller.py`](../src/cansat_hw/servos/controller.py) |
+| `SERVO …`-dispatcher in het wire-protocol + `SVO`-preflight check + MISSION-allowlist voor `SERVO STATUS` | [`src/cansat_hw/radio/wire_protocol.py`](../src/cansat_hw/radio/wire_protocol.py) |
+| Autonome rail-policy hook in de main loop + watchdog-tick + atexit-park | [`scripts/cansat_radio_protocol.py`](../scripts/cansat_radio_protocol.py) |
+| Pico CLI: `!servo` sub-REPL + `!park` + `!servo enable/disable/status/tune` | [`basestation_cli.py`](../pico_files/Orginele%20cansat/RadioReceiver/basestation_cli.py) |
+| Tests: state-policy table, controller (rail / stow / park / tuning / watchdog / JSON), wire-roundtrip, SVO-preflight | [`tests/test_servo_state_policy.py`](../tests/test_servo_state_policy.py), [`tests/test_servo_controller.py`](../tests/test_servo_controller.py), [`tests/test_servo_wire.py`](../tests/test_servo_wire.py) |
+
+**Wire-conventie**: replies zijn `OK SVO …` / `ERR SVO …` (3-letter code
+zodat het binnen 60 B past, gelijk aan de preflight `SVO`-code).
+
+**Wat er anders is dan de oorspronkelijke spec**:
+
+- `SERVO STOW` als calibratie-marker (binnen tuning) heet `SERVO STOW_MARK` in
+  het wire-protocol, zodat `SERVO STOW` zelf eenduidig de **manual-stow-actie**
+  is (rail al aan ⇒ stuur stow-pulse).
+- `SERVO STATUS` is óók in `MISSION`/`TEST` toegestaan (read-only), zodat de
+  operator tijdens een vlucht kan zien of de rail aan/uit staat.
+- `SERVO DISABLE` tijdens actieve tuning rondt eerst de tuning af (reply
+  `OK SVO DISABLE TUNING_STOPPED`) — voorkomt verweesde watchdog-firings.
+- Rail-actie bij `CONFIG → TEST` is `ENABLE` (niet `NONE`); TEST is een
+  dry-run van `DEPLOYED`, dus de gimbal hoort actief te zijn.
+- Op `MISSION → CONFIG` doet de policy **niets autonoom**: operator forceerde
+  abort, dus geen ongewenste extra beweging.
+
 ### Tooling rond logs ✅
 
 | Onderdeel | Belangrijkste files |
@@ -117,7 +145,11 @@ positie + grootte) meesturen in elk TLM-frame.
 - Process of thread? Process geeft betere CPU-isolatie maar IPC-overhead.
 - Camera-resolutie vs detectie-snelheid (640×480 of 1280×720).
 
-### Fase 12 — Servo-tuning + park/stow via radio 📋
+### Fase 12 — Servo-tuning + park/stow via radio (uitgewerkte spec, ✅ geïmplementeerd)
+
+> Verplaatst naar **[Afgerond](#fase-12--servo-tuning--parkstow-via-radio-)**.
+> Onderstaande spec blijft staan als architectuur-referentie en
+> motivatie-archief voor wie de implementatie wil herzien.
 
 **Doel**: gimbal-servo's volledig bedienbaar via het base station — zowel
 **calibreren** (equivalent van [`scripts/gimbal/servo_calibration.py`](../scripts/gimbal/servo_calibration.py))
@@ -288,9 +320,8 @@ kan een uur zitten). Pas inplannen als de rest stabiel vliegt.
 ## Voorgestelde volgorde
 
 1. **Fase 10 (docs)** — kort, ruimt achterstand op, maakt het project navigeerbaar voor leerlingen.
-2. **Fase 12 (servo via radio)** — vervangt een ergonomisch zwak punt (SSH nodig voor calibratie). Geen blocker maar wel veel waarde voor de hardware-uren.
-3. **Fase 9 (camera + AprilTag)** — hét grote ontbrekende stuk vóór een echte vlucht. Plan ruim.
-4. **Fase 5 (Pico-log)** of **Fase 11 (power)** afhankelijk van wat er bij echte testvluchten als pijnpunt naar boven komt.
+2. **Fase 9 (camera + AprilTag)** — hét grote ontbrekende stuk vóór een echte vlucht. Plan ruim.
+3. **Fase 5 (Pico-log)** of **Fase 11 (power)** afhankelijk van wat er bij echte testvluchten als pijnpunt naar boven komt.
 
 ---
 

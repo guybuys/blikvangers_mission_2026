@@ -56,7 +56,7 @@ en [`src/cansat_hw/radio/wire_protocol.py`](../src/cansat_hw/radio/wire_protocol
 | **seq** | Sequence counter | Oplopend nummer per TLM-frame (16-bit, wrapt op 0xFFFF). Gat = packetloss (per-mission file) of sessie-reset (continuous file). |
 | **`mode_state`** | 1-byte combinatie | Hoge nibble = mode (CONFIG/MISSION/TEST), lage nibble = flight-state (PAD_IDLE/ASCENT/...). |
 | **PING / OK / ERR** | Wire-commando-replies | Pico stuurt `PING`, Zero antwoordt `OK PING`. Algemene patroon: `OK <cmd> [args]` of `ERR <reden>`. |
-| **`SERVO ...`** | Wire-commando-familie | Servo-tuning + park/stow vanaf het base station. `SERVO START/STEP/SET/MIN/CENTER/MAX/STOW/SAVE/STOP` voor calibratie; `SERVO ENABLE/DISABLE/STOW/PARK` voor rail-bediening. Alleen toegelaten in `CONFIG`-mode. Zie [planning Fase 12](planning.md#fase-12--servo-tuning--parkstow-via-radio). |
+| **`SERVO ...`** | Wire-commando-familie | Servo-tuning + park/stow vanaf het base station. Calibratie (sub-state binnen `CONFIG`): `SERVO START/SEL/STEP/SET/MIN/CENTER/MAX/STOW_MARK/SAVE/STOP`. Rail-bediening: `SERVO ENABLE/DISABLE/STOW/PARK`. Read-only: `SERVO STATUS` (ook in `MISSION`/`TEST`). Replies = `OK SVO …` / `ERR SVO …`. Zie [planning Fase 12](planning.md#fase-12--servo-tuning--parkstow-via-radio-). |
 | **PREFLIGHT** | Pre-launch check | Zero controleert `TIME`/`GND`/`BME`/`IMU`/`DSK`/`LOG`/`FRQ`/`GIM` voor mode-wissel. Falen → `ERR PRE <welke>`. |
 | **`STOP RADIO`** | Wire-commando | Stopt de service op de Zero. Exit-code 0 → systemd herstart **niet** (`Restart=on-failure`). |
 

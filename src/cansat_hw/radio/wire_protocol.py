@@ -424,6 +424,7 @@ _MISSION_ALWAYS_CMDS = frozenset(
 		"GET IIR",
 		"GET ALT PRIME",
 		"GET STATE",
+		"SERVO STATUS",  # alleen-lezen; geen rail/pulse-effect
 		"SET MODE CONFIG",
 		"STOP RADIO",
 	}
@@ -439,6 +440,7 @@ _TEST_ALWAYS_CMDS = frozenset(
 		"GET TIME",
 		"GET IIR",
 		"GET STATE",
+		"SERVO STATUS",
 	}
 )
 
@@ -508,12 +510,13 @@ def preflight_checks(
 	*,
 	photo_dir: Optional[Union[str, Path]] = None,
 	gimbal_cfg: Optional[Union[str, Path]] = None,
+	servo: Optional[Any] = None,
 	min_free_mb: int = PREFLIGHT_MIN_FREE_MB,
 ) -> Tuple[List[str], List[str]]:
 	"""Voer alle pre-MISSION checks uit; retourneer ``(missing_codes, info_tokens)``.
 
 	Codes blijven kort (≤4 letters) zodat het antwoord in 60 bytes past:
-	``TIME`` ``GND`` ``BME`` ``IMU`` ``DSK`` ``LOG`` ``FRQ`` ``GIM``.
+	``TIME`` ``GND`` ``BME`` ``IMU`` ``DSK`` ``LOG`` ``FRQ`` ``GIM`` ``SVO``.
 	"""
 	missing: List[str] = []
 	info: List[str] = []
@@ -565,6 +568,22 @@ def preflight_checks(
 		gc = Path(gimbal_cfg).expanduser()
 		if not gc.is_file():
 			missing.append("GIM")
+
+	# Fase 12: SVO-preflight. Falen ⇒ "SVO" in missing-codes.
+	#   * Tuning-sub-state mag NIET actief zijn (anders blijft de rail aan
+	#     tijdens de transitie en vertelt PARK liegen).
+	#   * Calibratie moet compleet zijn voor BEIDE servo's, inclusief stow_us
+	#     (anders kan PARK niet uitgevoerd worden).
+	# Als ``servo`` None is, slaan we de check over (operator draait zonder
+	# servo-hardware; gimbal_cfg-check hierboven heeft de JSON al geverifieerd).
+	if servo is not None:
+		try:
+			if getattr(servo, "tuning_active", False):
+				missing.append("SVO")
+			elif not servo.calibration_complete():
+				missing.append("SVO")
+		except Exception:  # noqa: BLE001
+			missing.append("SVO")
 
 	info.append("ASC=%.1fm" % state.trig_ascent_height_m)
 	info.append("DEP=%.1fm" % state.trig_deploy_descent_m)
@@ -861,6 +880,165 @@ def _ground_calibrate(bme280: Any, *, prime_samples: int = 0) -> Tuple[bool, flo
 	return True, avg, ""
 
 
+def _format_servo_status(controller: Any) -> bytes:
+	"""``OK SVO STATUS R=<on|off> T=<on|off> SEL=<n|none> US1=<u> US2=<u>``."""
+	st = controller.status()
+	rail = "on" if st.rail_on else "off"
+	tun = "on" if st.tuning_active else "off"
+	sel = str(st.selected) if st.selected is not None else "-"
+	us1 = int(st.current_us.get(1, 0))
+	us2 = int(st.current_us.get(2, 0))
+	cal = "yes" if st.cal_complete else "no"
+	msg = "OK SVO R=%s T=%s SEL=%s US1=%d US2=%d CAL=%s" % (
+		rail,
+		tun,
+		sel,
+		us1,
+		us2,
+		cal,
+	)
+	return _truncate(msg.encode("utf-8"))
+
+
+def _handle_servo_cmd(
+	state: RadioRuntimeState,
+	controller: Optional[Any],
+	tokens: List[str],
+) -> bytes:
+	"""Dispatch alle ``SERVO …``-commando's. Caller heeft al geverifieerd dat
+	``tokens[0].upper() == "SERVO"``.
+
+	Return-conventie: ``OK SVO …`` of ``ERR SVO …`` (3-letter code houdt
+	het reply binnen 60 B). ``SERVO STATUS`` is altijd toegestaan; alle
+	andere SERVO-commando's vereisen ``state.mode == "CONFIG"`` zodat de
+	autonome rail-policy in MISSION/TEST niet doorkruist wordt.
+	"""
+	if controller is None:
+		return _truncate(b"ERR SVO NOHW")
+	if len(tokens) < 2:
+		return _truncate(b"ERR SVO BAD")
+
+	sub = tokens[1].upper()
+	# STATUS overal toegestaan (read-only).
+	if sub == "STATUS":
+		return _format_servo_status(controller)
+
+	# Vanaf hier: alleen in CONFIG. Tijdens MISSION/TEST regelt de
+	# state-policy de rail; manueel ingrijpen zou de gimbal saboteren.
+	if state.mode != "CONFIG":
+		return _truncate(b"ERR SVO BUSY")
+
+	# --- Park / rail commands (geen tuning vereist) ---
+	if sub == "ENABLE":
+		controller.enable_rail()
+		return _truncate(b"OK SVO ENABLE")
+	if sub == "DISABLE":
+		# Als tuning actief is, eerst stoppen (anders watchdog vuurt later toch).
+		if controller.tuning_active:
+			controller.stop_tuning()
+			return _truncate(b"OK SVO DISABLE TUNING_STOPPED")
+		controller.disable_rail()
+		return _truncate(b"OK SVO DISABLE")
+	if sub == "PARK":
+		# Convenience: full sequence ENABLE → STOW BOTH → wait → DISABLE.
+		ok = controller.park_all()
+		if not ok:
+			return _truncate(b"ERR SVO NOSTOW")
+		return _truncate(b"OK SVO PARK")
+	if sub == "STOW":
+		# Manual stow: vereist actieve rail; geen wait/disable hier.
+		if not controller.rail_on:
+			return _truncate(b"ERR SVO RAILOFF")
+		us1, us2 = controller.stow_all()
+		if us1 is None or us2 is None:
+			return _truncate(b"ERR SVO NOSTOW")
+		return _truncate(("OK SVO STOW US1=%d US2=%d" % (us1, us2)).encode("utf-8"))
+
+	# --- Tuning sub-state ---
+	if sub == "START":
+		# Optionele servo-index (default = 1).
+		idx = 1
+		if len(tokens) >= 3:
+			try:
+				idx = int(tokens[2])
+			except ValueError:
+				return _truncate(b"ERR SVO BAD")
+			if idx not in (1, 2):
+				return _truncate(b"ERR SVO BAD")
+		try:
+			controller.start_tuning(idx)
+		except Exception as e:  # noqa: BLE001
+			return _truncate(("ERR SVO %s" % e).encode("utf-8", errors="replace"))
+		return _format_servo_status(controller)
+	if sub == "STOP":
+		controller.stop_tuning()
+		return _truncate(b"OK SVO STOP")
+	if sub == "SAVE":
+		try:
+			path = controller.save_calibration()
+		except OSError as e:
+			return _truncate(("ERR SVO SAVE %s" % e).encode("utf-8", errors="replace"))
+		# Pad-naam kan lang zijn; geef alleen filename om binnen 60 B te blijven.
+		return _truncate(("OK SVO SAVE %s" % Path(path).name).encode("utf-8"))
+
+	# Hierna: alleen geldig tijdens actieve tuning.
+	if not controller.tuning_active:
+		return _truncate(b"ERR SVO NOTUN")
+
+	if sub == "SEL":
+		if len(tokens) < 3:
+			return _truncate(b"ERR SVO BAD")
+		try:
+			idx = int(tokens[2])
+		except ValueError:
+			return _truncate(b"ERR SVO BAD")
+		try:
+			controller.select(idx)
+		except (ValueError, RuntimeError) as e:
+			return _truncate(("ERR SVO %s" % e).encode("utf-8", errors="replace"))
+		return _format_servo_status(controller)
+	if sub == "STEP":
+		if len(tokens) < 3:
+			return _truncate(b"ERR SVO BAD")
+		try:
+			delta = int(tokens[2])
+		except ValueError:
+			return _truncate(b"ERR SVO BAD")
+		# Sanity: max 200 µs per stap zodat een typo niet de servo door
+		# de mechanische limieten ramt.
+		if not (-200 <= delta <= 200):
+			return _truncate(b"ERR SVO BAD")
+		try:
+			us = controller.step(delta)
+		except RuntimeError as e:
+			return _truncate(("ERR SVO %s" % e).encode("utf-8", errors="replace"))
+		return _truncate(("OK SVO STEP %d" % us).encode("utf-8"))
+	if sub == "SET":
+		if len(tokens) < 3:
+			return _truncate(b"ERR SVO BAD")
+		try:
+			us = int(tokens[2])
+		except ValueError:
+			return _truncate(b"ERR SVO BAD")
+		if not (500 <= us <= 2500):
+			return _truncate(b"ERR SVO BAD")
+		try:
+			out = controller.set_us(us)
+		except RuntimeError as e:
+			return _truncate(("ERR SVO %s" % e).encode("utf-8", errors="replace"))
+		return _truncate(("OK SVO SET %d" % out).encode("utf-8"))
+	if sub in ("MIN", "CENTER", "MAX", "STOW_MARK"):
+		# STOW_MARK i.p.v. STOW omdat SERVO STOW al de manual-stow-actie is.
+		mark_kind = sub if sub != "STOW_MARK" else "STOW"
+		try:
+			us = controller.mark(mark_kind)
+		except (ValueError, RuntimeError) as e:
+			return _truncate(("ERR SVO %s" % e).encode("utf-8", errors="replace"))
+		return _truncate(("OK SVO %s %d" % (mark_kind, us)).encode("utf-8"))
+
+	return _truncate(b"ERR SVO BAD")
+
+
 def handle_wire_line(
 	rfm: Any,
 	state: RadioRuntimeState,
@@ -870,6 +1048,7 @@ def handle_wire_line(
 	bno055: Optional[Any] = None,
 	photo_dir: Optional[Union[str, Path]] = None,
 	gimbal_cfg: Optional[Union[str, Path]] = None,
+	servo: Optional[Any] = None,
 ) -> bytes:
 	"""
 	Verwerk één payload-regel (zonder RadioHead-header).
@@ -920,6 +1099,7 @@ def handle_wire_line(
 			bno055,
 			photo_dir=photo_dir,
 			gimbal_cfg=gimbal_cfg,
+			servo=servo,
 		)
 		if missing:
 			return _truncate(("ERR PRE " + " ".join(missing)).encode("utf-8"))
@@ -1271,8 +1451,12 @@ def handle_wire_line(
 			bno055,
 			photo_dir=photo_dir,
 			gimbal_cfg=gimbal_cfg,
+			servo=servo,
 		)
 		return _format_preflight_reply(missing, info)
+
+	if tokens and tokens[0].upper() == "SERVO":
+		return _handle_servo_cmd(state, servo, tokens)
 
 	if su in ("READ BME280", "BME280"):
 		if bme280 is None:

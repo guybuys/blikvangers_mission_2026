@@ -19,19 +19,44 @@ Software en hardware-documentatie voor de **CanSat** (**Raspberry Pi Zero 2 W**)
 - **SPI** ingeschakeld (`raspi-config` of `dtparam=spi=on` in `/boot/firmware/config.txt`)  
 - Gebruiker in groepen **`spi`** en **`gpio`** (na `usermod`: opnieuw inloggen)
 
+## Ontwikkelen zonder hardware (Linux of macOS laptop)
+
+Geen Pi, geen RFM69, geen servo's nodig — alles wat je nodig hebt om
+code te lezen, te schrijven en de **volledige test-suite** te draaien.
+
+```bash
+git clone <repo>
+cd cansat_mission_2026
+python3 -m venv .venv          # op Debian/Ubuntu evt. eerst: sudo apt install python3-venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+pytest                         # 247 passed
+```
+
+De Pi-only C-extensies (`spidev`, `RPi.GPIO`, `lgpio`, `pigpio`) zitten
+**niet** in de basis-install — die hebben echte hardware nodig en worden
+in de tests via fakes/mocks vervangen. Hardware-scripts zoals
+`scripts/gimbal/*.py` of `scripts/radio_rfm69_test.py` werken pas op de
+Zero zelf, dat geldt voor élke laptop.
+
+Voor de Pico/base station: Thonny of `mpremote` werken kruisplatform
+identiek.
+
 ## Snelstart op de CanSat (Zero 2 W)
 
 ```bash
 cd cansat_mission_2026
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
-# Aanbevolen op de Zero (minder gpiozero-warnings):
-pip install -e ".[rpi]"
-# Gimbal / BNO055 over I²C + pigpio in dezelfde venv (gebruik altijd dezelfde Python als voor scripts):
-python -m pip install -e ".[gimbal]"
+# Op de Zero: alle hardware-stack ineens (combineer extras met komma in één haakje):
+python -m pip install -e ".[rpi,sensors,gimbal]"
 python -c "import pigpio; print('pigpio ok')"
 ```
+
+`pip install -e .` zonder extras is bedoeld voor laptops/CI: de Pi-only
+C-extensies (`spidev`, `RPi.GPIO`, `lgpio`, `pigpio`) worden dan
+overgeslagen. Op de Zero **moet** je minstens de `[rpi]`-extra meenemen,
+anders kan de RFM69-driver geen SPI openen.
 
 **Opnieuw dezelfde venv gebruiken** (geen `python3 -m venv` meer — die maakt een lege omgeving zonder `pigpio` / `smbus2`):
 
@@ -40,7 +65,7 @@ source .venv/bin/activate
 cd cansat_mission_2026
 ```
 
-Alleen als je de map **`.venv` verwijdert** of op een **nieuwe machine** begint: opnieuw `python3 -m venv .venv`, dan `source .venv/bin/activate` en **opnieuw** `pip install -e .` en de extras die je nodig hebt (`.[rpi]`, `.[gimbal]`, `.[sensors]`, …).
+Alleen als je de map **`.venv` verwijdert** of op een **nieuwe machine** begint: opnieuw `python3 -m venv .venv`, dan `source .venv/bin/activate` en **opnieuw** `pip install -e ".[rpi,sensors,gimbal]"` (of de subset die je nodig hebt — `.[rpi]`, `.[gimbal]`, `.[sensors]`, `.[camera]`).
 
 Radio-test (NSS op **SPI CE0**, reset standaard **BCM 25** — zie documentatie):
 
@@ -52,7 +77,7 @@ python scripts/radio_rfm69_test.py --send "hello"
 
 Meer opties: `python scripts/radio_rfm69_test.py --help`
 
-**Radio commando-protocol (CanSat = Zero 2 W via SSH; base station = Pico via Thonny):** na `pip install -e .` op de **Zero**:
+**Radio commando-protocol (CanSat = Zero 2 W via SSH; base station = Pico via Thonny):** na `pip install -e ".[rpi]"` (of breder, zie hierboven) op de **Zero**:
 
 ```bash
 source .venv/bin/activate

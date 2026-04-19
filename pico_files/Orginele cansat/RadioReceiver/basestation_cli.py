@@ -374,12 +374,101 @@ def _print_help_local():
 	print("  !altprime [N]  zonder N: GET ALT PRIME; met N (1..32): SET ALT PRIME N — meer = accuratere !alt, trager")
 	print("  !listen        alleen ontvangen (ACK aan) tot Ctrl+C — Thonny: stop knop")
 	print("  !test [s]      vraag TEST-mode op de CanSat (default 10s, 2..60), luister naar TLM")
+	print("  !servo         open servo-tuning sub-REPL (SERVO START -> letters -> SAVE/STOP)")
+	print("  !servo enable  zet servo-rail aan (geen pulse)")
+	print("  !servo disable zet servo-rail uit (stopt tuning indien actief)")
+	print("  !servo park    PARK-sequentie: rail aan -> stow -> wacht 800ms -> rail uit")
+	print("  !servo status  toont rail/tuning/cur-us van de Zero-controller")
+	print("  !park          alias voor !servo park (snelle veilige stow)")
 	print("  !log on [pad]  start JSONL-log (default cansat_<ts>.jsonl op Pico-flash)")
 	print("  !log off       sluit de huidige log af")
 	print("  !log status    toont of er gelogd wordt + pad")
 	print()
 	print("Typ een regel zonder ! om die naar de CanSat te sturen (max %u bytes UTF-8)." % MAX_PAYLOAD)
 	print()
+
+
+def _print_servo_help():
+	print()
+	print("=== Servo-tuning sub-REPL (alleen in CONFIG) ===")
+	print("  1 / 2          selecteer servo 1 / 2")
+	print("  a / d          -10 / +10 µs  (klein)")
+	print("  A / D          -50 / +50 µs  (groot)")
+	print("  N              SET us-waarde (bv. 1500)")
+	print("  z / x / c      mark MIN / CENTER / MAX op huidige us")
+	print("  w              mark STOW op huidige us")
+	print("  p              status (rail/tuning/cur-us/cal)")
+	print("  s              SAVE calibratie naar JSON op de Zero")
+	print("  q              STOP tuning (rail uit) en sluit sub-REPL")
+	print("  ?              dit overzicht")
+	print()
+
+
+def _run_servo_repl():
+	"""Open de tuning-sub-REPL: stuur SERVO START en handel letters af."""
+	# Default: starten met servo 1. ``_send_and_wait_reply`` geeft niets terug
+	# (None) — we openen de REPL ook als de Zero niet antwoordt zodat de
+	# operator kan retry'en met 'p' (status) of 'q' (stop).
+	_send_and_wait_reply("SERVO START 1")
+	_print_servo_help()
+	while True:
+		try:
+			cmd = input("servo> ").strip()
+		except (KeyboardInterrupt, EOFError):
+			print()
+			_send_and_wait_reply("SERVO STOP")
+			return
+		if not cmd:
+			continue
+		if cmd in ("q", "Q"):
+			_send_and_wait_reply("SERVO STOP")
+			return
+		if cmd in ("?", "h", "help"):
+			_print_servo_help()
+			continue
+		if cmd in ("1", "2"):
+			_send_and_wait_reply("SERVO SEL %s" % cmd)
+			continue
+		if cmd == "a":
+			_send_and_wait_reply("SERVO STEP -10")
+			continue
+		if cmd == "d":
+			_send_and_wait_reply("SERVO STEP 10")
+			continue
+		if cmd == "A":
+			_send_and_wait_reply("SERVO STEP -50")
+			continue
+		if cmd == "D":
+			_send_and_wait_reply("SERVO STEP 50")
+			continue
+		if cmd == "z":
+			_send_and_wait_reply("SERVO MIN")
+			continue
+		if cmd == "x":
+			_send_and_wait_reply("SERVO CENTER")
+			continue
+		if cmd == "c":
+			_send_and_wait_reply("SERVO MAX")
+			continue
+		if cmd == "w":
+			_send_and_wait_reply("SERVO STOW_MARK")
+			continue
+		if cmd == "p":
+			_send_and_wait_reply("SERVO STATUS")
+			continue
+		if cmd == "s":
+			_send_and_wait_reply("SERVO SAVE")
+			continue
+		# Numeriek: directe SET us
+		try:
+			us = int(cmd)
+		except ValueError:
+			print("?  typ '?' voor help")
+			continue
+		if not (500 <= us <= 2500):
+			print("ERR: us moet 500..2500")
+			continue
+		_send_and_wait_reply("SERVO SET %d" % us)
 
 
 def _handle_local(line: str) -> bool:
@@ -483,6 +572,27 @@ def _handle_local(line: str) -> bool:
 			_send_and_wait_reply("SET ALT PRIME %d" % n)
 		else:
 			_send_and_wait_reply("GET ALT PRIME")
+	elif cmd == "!park":
+		_send_and_wait_reply("SERVO PARK")
+	elif cmd == "!servo":
+		if len(parts) < 2:
+			_run_servo_repl()
+			return True
+		sub = parts[1].strip().lower()
+		if sub == "enable":
+			_send_and_wait_reply("SERVO ENABLE")
+		elif sub == "disable":
+			_send_and_wait_reply("SERVO DISABLE")
+		elif sub == "park":
+			_send_and_wait_reply("SERVO PARK")
+		elif sub == "stow":
+			_send_and_wait_reply("SERVO STOW")
+		elif sub == "status":
+			_send_and_wait_reply("SERVO STATUS")
+		elif sub == "tune":
+			_run_servo_repl()
+		else:
+			print("ERR: !servo [enable|disable|park|stow|status|tune] of !servo (= tune)")
 	elif cmd == "!test":
 		seconds = 10.0
 		if len(parts) >= 2:

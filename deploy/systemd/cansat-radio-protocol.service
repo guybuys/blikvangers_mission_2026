@@ -7,7 +7,8 @@
 #   sudo systemctl enable --now cansat-radio-protocol.service
 #
 # Vereisten:
-#   - SPI aan; venv met pip install -e . (en evt. .[rpi])
+#   - SPI aan; venv met pip install -e ".[rpi,sensors,gimbal]" (.[rpi] is verplicht
+#     voor SPI/RFM69; .[sensors] voor BME280/BNO055; .[gimbal] voor servo's)
 #   - Timezone (bv. Brussel): sudo timedatectl set-timezone Europe/Brussels
 #   - SET TIME over de radio: dit service draait als **root** zodat de klok gezet kan worden
 #     (clock_settime). Zonder root: timedatectl + sudoers, of weiger SET TIME (ERR TIME).

@@ -237,6 +237,24 @@ def main() -> int:
 		"(state-machine reageert sneller op hoogte-veranderingen, ook zonder bevel van "
 		"de Pico); te laag verzadigt de radio. Default 1.0 s.",
 	)
+	p.add_argument(
+		"--no-servo",
+		action="store_true",
+		help="Schakel de servo-controller uit (geen pigpio, geen SERVO-cmds). Handig "
+		"voor radio-only test-runs zonder gimbal-hardware.",
+	)
+	p.add_argument(
+		"--servo-enable-pin",
+		type=int,
+		default=6,
+		metavar="BCM",
+		help="BCM GPIO voor de servo-rail-enable (default 6). 0 = geen rail-control.",
+	)
+	p.add_argument(
+		"--servo-enable-active-low",
+		action="store_true",
+		help="Servo-rail enable-pin is active-low (rail aan = pin laag).",
+	)
 	args = p.parse_args()
 	if args.mission_tlm_interval < 0.1:
 		print("--mission-tlm-interval moet >= 0.1 s zijn", file=sys.stderr)
@@ -330,6 +348,13 @@ def main() -> int:
 		test_mode_tick,
 	)
 	from cansat_hw.sensors.sampler import SensorSampler
+	from cansat_hw.servos import (
+		ServoAction,
+		ServoController,
+		action_for_shutdown,
+		action_for_transition,
+		make_pigpio_driver,
+	)
 	from cansat_hw.telemetry import LogManager, state_name
 
 	rfm = RFM69(
@@ -367,6 +392,52 @@ def main() -> int:
 	# zien — én zodat de IMU-rolling-windows (peak ‖a‖, freefall, alt-stable)
 	# voortdurend bijgewerkt blijven, ook als de Pico tijdelijk uit range is.
 	sampler = SensorSampler(bme280=bme280, bno055=bno055)
+
+	# Servo-controller (Fase 12). Wordt over radio bestuurd in CONFIG (SERVO …)
+	# en autonoom door de state-policy bij flight-state-overgangen. We laden
+	# pigpio enkel als de gebruiker servos wil (--no-servo override + JSON
+	# bestaat); op een Mac/dev-machine zonder pigpio of zonder gimbal-cfg
+	# loopt de service gewoon door zonder gimbal-functionaliteit.
+	servo: Optional[ServoController] = None
+	gimbal_cfg_path = Path(args.gimbal_cfg).expanduser()
+	if not args.no_servo and gimbal_cfg_path.is_file():
+		try:
+			import pigpio as _pg  # noqa: F401  (alleen voor connect-check)
+
+			_pi = _pg.pi()
+			if not _pi.connected:
+				print(
+					"WARN: pigpiod niet bereikbaar — servo-controller uit. "
+					"Start met: sudo systemctl start pigpiod",
+					file=sys.stderr,
+				)
+			else:
+				driver = make_pigpio_driver(
+					_pi,
+					int(args.servo_enable_pin),
+					active_low=bool(args.servo_enable_active_low),
+				)
+				servo = ServoController(driver, gimbal_cfg_path)
+				cal_ok = servo.calibration_complete()
+				print(
+					"Servo-controller actief — cal=%s rail-pin=%d (%s)"
+					% (
+						"complete" if cal_ok else "incompleet",
+						int(args.servo_enable_pin),
+						"active-low" if args.servo_enable_active_low else "active-high",
+					)
+				)
+		except ImportError:
+			print(
+				"WARN: pigpio niet geïnstalleerd — servo-controller uit. "
+				"Installeer met: sudo apt install python3-pigpio",
+				file=sys.stderr,
+			)
+	elif not args.no_servo:
+		print(
+			"WARN: gimbal-cfg %s ontbreekt — servo-controller uit." % gimbal_cfg_path,
+			file=sys.stderr,
+		)
 
 	def _emit_evt_state_if_changed() -> None:
 		"""Stuur ongevraagd ``EVT STATE <NAME> [<REASON>]`` als de state-
@@ -411,6 +482,44 @@ def main() -> int:
 			)
 		log_manager.write_payload(evt_state)
 		state.last_announced_flight_state = int(state.flight_state)
+
+	# Bookkeeping voor de servo-state-policy: vorige (mode, flight_state).
+	# Bij elke iteratie vergelijken we dit met de actuele waarde en passen
+	# de policy toe (PARK / ENABLE / DISABLE / NONE). Door de hook éénmalig
+	# bovenaan de loop te runnen, vangen we transities ongeacht of ze door
+	# een Pico-commando, sampler-tick of TEST-end-timer veroorzaakt zijn.
+	servo_prev_state: tuple = (state.mode, int(state.flight_state))
+
+	def _apply_servo_policy() -> None:
+		"""Pas state-policy toe als (mode, flight_state) sinds vorige iteratie veranderde."""
+		nonlocal servo_prev_state
+		if servo is None:
+			servo_prev_state = (state.mode, int(state.flight_state))
+			return
+		now_state = (state.mode, int(state.flight_state))
+		if now_state == servo_prev_state:
+			return
+		action = action_for_transition(servo_prev_state, now_state)
+		try:
+			if action == ServoAction.PARK:
+				servo.park_all()
+			elif action == ServoAction.ENABLE:
+				servo.enable_rail()
+			elif action == ServoAction.DISABLE:
+				servo.disable_rail()
+		except Exception as e:  # noqa: BLE001
+			print(
+				"WARN: servo policy %s na %s->%s faalde: %s"
+				% (action.value, servo_prev_state, now_state, e),
+				file=sys.stderr,
+			)
+		else:
+			if args.verbose and action != ServoAction.NONE:
+				print(
+					"SERVO: policy %s na transitie %s -> %s"
+					% (action.value, servo_prev_state, now_state)
+				)
+		servo_prev_state = now_state
 
 	try:
 		rfm.frequency_mhz = args.freq
@@ -464,6 +573,24 @@ def main() -> int:
 			# wachten op een Pico-commando — anders zie je de transitie
 			# nooit aan operator-zijde (Pico zit dan op input()).
 			_emit_evt_state_if_changed()
+			# Servo-rail policy. Reageer op elke (mode, flight_state)-overgang
+			# zodat de gimbal autonoom geënabled/gepark wordt — onafhankelijk
+			# van de oorzaak (Pico-commando of state-machine).
+			_apply_servo_policy()
+			# Tuning-watchdog: kapt een vergeten SERVO START na 60 s zodat de
+			# rail niet onbedoeld aan blijft staan en LiPo leegloopt.
+			if servo is not None:
+				wd = servo.tick()
+				if wd:
+					evt_wd = b"EVT SERVO WATCHDOG"
+					dest_wd = (
+						state.test_dest_node
+						if state.test_dest_node is not None
+						else args.dest
+					)
+					rfm.send(evt_wd, keep_listening=True, destination=dest_wd)
+					log_manager.write_payload(evt_wd)
+					print("SERVO: tuning watchdog kapte sessie -> stopped")
 			send_tlm, end_test = test_mode_tick(state)
 			if end_test:
 				dest = state.test_dest_node if state.test_dest_node is not None else args.dest
@@ -542,6 +669,7 @@ def main() -> int:
 					bno055=bno055,
 					photo_dir=args.photo_dir,
 					gimbal_cfg=args.gimbal_cfg,
+					servo=servo,
 				)
 				if args.verbose:
 					print("TX to  ", from_node, ":", reply.decode("utf-8", errors="replace"))
@@ -627,6 +755,27 @@ def main() -> int:
 			try:
 				bno055.close()
 			except Exception:
+				pass
+		# Servo shutdown vóór log_manager.close() zodat een eventuele atexit-
+		# park-EVT nog gelogd kan worden. Bij rail-aan park'en we netjes naar
+		# stowed; bij actieve tuning kappen we de sessie zonder beweging.
+		if servo is not None:
+			try:
+				action = action_for_shutdown(servo.rail_on)
+				if action == ServoAction.PARK:
+					print("SERVO: atexit park (rail was aan)")
+				servo.shutdown()
+			except Exception as e:  # noqa: BLE001
+				print("WARN: servo shutdown faalde:", e, file=sys.stderr)
+			# pigpio-pi loskoppelen indien we hem zelf opzetten.
+			try:
+				import pigpio as _pg
+
+				_pi_handle = getattr(servo, "_driver", None)
+				_pi_obj = getattr(_pi_handle, "_pi", None)
+				if _pi_obj is not None and isinstance(_pi_obj, _pg.pi):
+					_pi_obj.stop()
+			except Exception:  # noqa: BLE001
 				pass
 		try:
 			log_manager.close()

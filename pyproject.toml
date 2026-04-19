@@ -8,15 +8,21 @@ version = "0.1.0"
 description = "Hardware drivers for CanSat mission (Pi Zero 2 W)"
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = [
-    "spidev>=3.5",
-    "gpiozero>=2.0",
-]
+# Geen runtime-deps op project-niveau: alle hardware-stack is Pi-specifiek
+# (zie ``[project.optional-dependencies]``). Hierdoor werkt
+# ``pip install -e ".[dev]"`` zonder C-extensie-builds op macOS / generieke CI.
+dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
-# Op de Pi: RPi.GPIO voor reset; lgpio voor DIO0-wacht (add_event_detect faalt vaak in venv + rpigpio).
-rpi = ["RPi.GPIO>=0.7", "lgpio>=0.2"]
+# Op de Pi: spidev (RFM69 SPI) + gpiozero (reset/DIO0); RPi.GPIO als gpiozero-factory;
+# lgpio voor DIO0-wacht (add_event_detect faalt vaak in venv + rpigpio).
+rpi = [
+    "spidev>=3.5",
+    "gpiozero>=2.0",
+    "RPi.GPIO>=0.7",
+    "lgpio>=0.2",
+]
 # BME280 (I²C): smbus2 op de Zero; op Mac zonder I²C niet installeren.
 sensors = ["smbus2>=0.4.3"]
 # Gimbal-scripts (pigpio-Pythonclient + smbus2); op de Pi ook ``sudo apt install pigpio python3-pigpio`` / ``pigpiod``.
@@ -31,3 +37,7 @@ camera = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
