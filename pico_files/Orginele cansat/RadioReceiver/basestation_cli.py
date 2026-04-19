@@ -25,6 +25,12 @@ from protocol import (
 	validate_wire_line,
 )
 from rfm69 import RFM69
+from tlm_decode import (
+	FRAME_SIZE as TLM_FRAME_SIZE,
+	decode_tlm,
+	format_tlm_short,
+	is_binary_packet,
+)
 
 # --- Standaard RF-instellingen (gelijk houden met CanSat / rfm69test_emitter) ---
 # Optioneel overschrijven via ``secrets.py`` (niet in git). Zie
@@ -236,14 +242,45 @@ def _update_mode_from_parsed(parsed):
 	if not parsed:
 		return
 	k = parsed.get("kind")
-	if k == "MODE":
+	if k in ("MODE", "EVT_MODE", "TLM"):
 		m = parsed.get("mode")
 		if isinstance(m, str):
 			MODE_LAST = m
-	elif k == "EVT_MODE":
-		m = parsed.get("mode")
-		if isinstance(m, str):
-			MODE_LAST = m
+
+
+def _decode_packet(pkt):
+	"""Decodeer een RX-pakket (bytes/None) naar (text_or_None, parsed_dict_or_None).
+
+	- Binary frames (eerste byte < 0x20) gaan via :func:`decode_tlm`.
+	- Tekst-frames worden eerst als UTF-8 gedecodeerd en daarna door
+	  :func:`_parse_reply` gestructureerd.
+	- Voor binary frames bevat ``text`` een korte mens-leesbare samenvatting
+	  zodat de bestaande print/log-paden gewoon werken.
+	"""
+	if not pkt:
+		return None, None
+	if is_binary_packet(pkt[0]):
+		if len(pkt) < TLM_FRAME_SIZE:
+			return ("<binary frame too short: %d B>" % len(pkt)), {
+				"kind": "BIN_ERR",
+				"err": "short",
+				"first_byte": pkt[0],
+				"len": len(pkt),
+			}
+		try:
+			parsed = decode_tlm(pkt)
+		except Exception as e:
+			return ("<binary decode err: %s>" % e), {
+				"kind": "BIN_ERR",
+				"err": str(e),
+				"first_byte": pkt[0],
+			}
+		return format_tlm_short(parsed), parsed
+	try:
+		text = str(pkt, "utf-8")
+	except Exception:
+		return None, {"kind": "BIN_RAW", "first_byte": pkt[0], "len": len(pkt)}
+	return text, _parse_reply(text)
 
 
 def _load_persisted_freq():
@@ -451,17 +488,22 @@ def _handle_local(line: str) -> bool:
 		while True:
 			pkt = rfm.receive(with_ack=True)
 			if pkt is not None:
-				print("RX:", pkt)
-				reply_text = ""
-				try:
-					reply_text = str(pkt, "utf-8")
-					print("    ASCII:", reply_text)
-				except Exception:
-					pass
+				text, parsed = _decode_packet(pkt)
+				if parsed and parsed.get("kind") == "TLM":
+					print("RX TLM:", text)
+				else:
+					print("RX:", pkt)
+					if text:
+						print("    ASCII:", text)
 				print("    RSSI:", rfm.last_rssi)
-				parsed = _parse_reply(reply_text) if reply_text else None
 				_update_mode_from_parsed(parsed)
-				_log_emit("RX", reply_text, rssi=rfm.last_rssi, parsed=parsed, extra={"listen": True})
+				_log_emit(
+					"RX",
+					text if text else "",
+					rssi=rfm.last_rssi,
+					parsed=parsed,
+					extra={"listen": True},
+				)
 	else:
 		print("Onbekend lokaal commando — typ !help")
 	return True
@@ -521,45 +563,66 @@ def _run_test_mode(seconds):
 		print("(geen antwoord binnen %.1f s)" % REPLY_TIMEOUT_S)
 		_log_emit("TIMEOUT", wire, extra={"timeout_s": REPLY_TIMEOUT_S})
 		return
-	try:
-		reply_text = str(pkt, "utf-8")
-	except Exception:
-		reply_text = ""
+	reply_text, parsed = _decode_packet(pkt)
 	print("RX <-", pkt)
-	print("    ASCII:", reply_text)
+	if reply_text:
+		print("    ASCII:", reply_text)
 	print("    RSSI:", rfm.last_rssi)
-	parsed = _parse_reply(reply_text) if reply_text else None
 	_update_mode_from_parsed(parsed)
-	_log_emit("RX", reply_text, rssi=rfm.last_rssi, parsed=parsed)
-	if not reply_text.startswith("OK MODE TEST"):
+	_log_emit("RX", reply_text or "", rssi=rfm.last_rssi, parsed=parsed)
+	if not (reply_text and reply_text.startswith("OK MODE TEST")):
 		print("TEST-mode niet gestart — zie reply.")
 		return
 	deadline_s = time.ticks_add(time.ticks_ms(), int((float(seconds) + 3.0) * 1000))
 	print("Listen-only voor TLM (%.1f s + 3s buffer); Ctrl+C om vroeger te stoppen." % float(seconds))
+	# Bijhouden van seq-gaten zodat de operator pakketverlies meteen ziet.
 	frames = 0
+	last_seq = None
+	missed = 0
 	try:
 		while time.ticks_diff(deadline_s, time.ticks_ms()) > 0:
 			rx = rfm.receive(with_ack=False, timeout=0.5, keep_listening=True)
 			if rx is None:
 				continue
-			try:
-				rx_text = str(rx, "utf-8")
-			except Exception:
-				rx_text = ""
-			print("RX:", rx_text if rx_text else rx)
+			rx_text, rx_parsed = _decode_packet(rx)
+			if rx_parsed and rx_parsed.get("kind") == "TLM":
+				seq = rx_parsed.get("seq")
+				if last_seq is not None and isinstance(seq, int):
+					gap = (seq - last_seq - 1) & 0xFFFF
+					if 0 < gap < 1000:
+						missed += gap
+				last_seq = seq
+				print("RX TLM:", rx_text)
+			else:
+				print("RX:", rx_text if rx_text else rx)
 			print("    RSSI:", rfm.last_rssi)
-			rx_parsed = _parse_reply(rx_text) if rx_text else None
 			_update_mode_from_parsed(rx_parsed)
-			_log_emit("RX", rx_text, rssi=rfm.last_rssi, parsed=rx_parsed, extra={"test": True})
+			_log_emit(
+				"RX",
+				rx_text or "",
+				rssi=rfm.last_rssi,
+				parsed=rx_parsed,
+				extra={"test": True},
+			)
 			frames += 1
 			if rx_parsed and rx_parsed.get("kind") == "EVT_MODE" and rx_parsed.get("mode") == "CONFIG":
-				print("TEST-mode afgesloten (EVT MODE CONFIG). Frames:", frames)
+				print(
+					"TEST-mode afgesloten (EVT MODE CONFIG). Frames:",
+					frames,
+					"missed seq:",
+					missed,
+				)
 				return
 	except KeyboardInterrupt:
 		print()
 		print("Listen onderbroken.")
 		return
-	print("TEST-mode listen-window afgelopen (geen EVT ontvangen). Frames:", frames)
+	print(
+		"TEST-mode listen-window afgelopen (geen EVT ontvangen). Frames:",
+		frames,
+		"missed seq:",
+		missed,
+	)
 
 
 def _send_and_wait_reply(wire_line: str):
@@ -589,17 +652,13 @@ def _send_and_wait_reply(wire_line: str):
 		_log_emit("TIMEOUT", wire_line, extra={"timeout_s": REPLY_TIMEOUT_S})
 		return
 	print("RX <-", pkt)
-	reply_text = ""
-	try:
-		reply_text = str(pkt, "utf-8")
-		print("    ASCII:", reply_text)
-	except Exception:
-		pass
-	print("    RSSI:", rfm.last_rssi)
-	parsed = _parse_reply(reply_text) if reply_text else None
-	_update_mode_from_parsed(parsed)
-	_log_emit("RX", reply_text if reply_text else "", rssi=rfm.last_rssi, parsed=parsed)
+	reply_text, parsed = _decode_packet(pkt)
 	if reply_text:
+		print("    ASCII:", reply_text)
+	print("    RSSI:", rfm.last_rssi)
+	_update_mode_from_parsed(parsed)
+	_log_emit("RX", reply_text or "", rssi=rfm.last_rssi, parsed=parsed)
+	if reply_text and not (parsed and parsed.get("kind") == "TLM"):
 		_post_process_reply(wire_line, reply_text)
 
 

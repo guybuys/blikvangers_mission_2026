@@ -631,12 +631,13 @@ class TestModeTickTest(unittest.TestCase):
 
 
 class TelemetryPacketTest(unittest.TestCase):
-	def test_fits_in_max_payload(self) -> None:
+	def test_binary_frame_is_exact_size_and_first_byte(self) -> None:
 		from cansat_hw.radio.wire_protocol import (
 			MAX_PAYLOAD,
 			RadioRuntimeState,
 			build_telemetry_packet,
 		)
+		from cansat_hw.telemetry.codec import RECORD_TLM, is_binary_packet
 
 		st = RadioRuntimeState(mode="TEST")
 		st.ground_hpa = 1013.2
@@ -644,41 +645,111 @@ class TelemetryPacketTest(unittest.TestCase):
 		bme = _fake_bme(1005.0)
 		bno = _fake_bno(3)
 		bno.read_euler = MagicMock(return_value=(123.4, 5.6, -7.8))
+		bno.read_linear_acceleration = MagicMock(return_value=(0.1, 0.2, 0.3))
 		pkt = build_telemetry_packet(st, bme, bno, now_monotonic=3.456)
-		self.assertTrue(pkt.startswith(b"TLM "))
-		self.assertLessEqual(len(pkt), MAX_PAYLOAD)
-		text = pkt.decode("utf-8")
-		parts = text.split()
-		self.assertEqual(len(parts), 9)
-		self.assertEqual(parts[0], "TLM")
-		self.assertEqual(parts[1], "3456")
+		self.assertEqual(len(pkt), MAX_PAYLOAD)
+		self.assertEqual(pkt[0], RECORD_TLM)
+		self.assertTrue(is_binary_packet(pkt[0]))
 
-	def test_na_tokens_when_sensors_missing(self) -> None:
-		from cansat_hw.radio.wire_protocol import RadioRuntimeState, build_telemetry_packet
+	def test_round_trip_decodes_sensor_values(self) -> None:
+		from cansat_hw.radio.wire_protocol import (
+			RadioRuntimeState,
+			build_telemetry_packet,
+		)
+		from cansat_hw.telemetry.codec import (
+			MODE_TEST,
+			STATE_DEPLOYED,
+			unpack_tlm,
+		)
+
+		st = RadioRuntimeState(mode="TEST")
+		st.ground_hpa = 1013.2
+		st.test_start_monotonic = 0.0
+		bme = _fake_bme(1005.0)  # ~70 m boven grond.
+		bno = _fake_bno(3)
+		bno.read_euler = MagicMock(return_value=(123.4, 5.6, -7.8))
+		bno.read_linear_acceleration = MagicMock(return_value=(0.0, 0.0, 9.80665))
+		pkt = build_telemetry_packet(st, bme, bno, now_monotonic=1.0)
+		f = unpack_tlm(pkt)
+		self.assertEqual(f.mode, MODE_TEST)
+		self.assertEqual(f.state, STATE_DEPLOYED)
+		self.assertGreater(f.alt_m or 0, 50)  # ~70m
+		self.assertAlmostEqual(f.pressure_hpa, 1005.0, places=1)
+		self.assertAlmostEqual(f.heading_deg, 123.4, places=1)
+		self.assertAlmostEqual(f.roll_deg, 5.6, places=1)
+		self.assertAlmostEqual(f.pitch_deg, -7.8, places=1)
+		# Lineaire acceleratie z=9.81 m/s² => 1.0 g.
+		self.assertAlmostEqual(f.az_g, 1.0, places=2)
+		self.assertEqual(f.sys_cal, 3)
+
+	def test_seq_increments_per_call_and_wraps_at_uint16(self) -> None:
+		from cansat_hw.radio.wire_protocol import (
+			RadioRuntimeState,
+			build_telemetry_packet,
+		)
+		from cansat_hw.telemetry.codec import unpack_tlm
 
 		st = RadioRuntimeState(mode="TEST")
 		st.test_start_monotonic = 0.0
-		pkt = build_telemetry_packet(st, None, None, now_monotonic=1.0)
-		text = pkt.decode("utf-8")
-		parts = text.split()
-		self.assertEqual(parts[0], "TLM")
-		self.assertEqual(parts[1], "1000")
-		# Alles behalve dt_ms moet NA zijn.
-		for token in parts[2:]:
-			self.assertEqual(token, "NA")
+		seqs = [
+			unpack_tlm(build_telemetry_packet(st, None, None)).seq
+			for _ in range(3)
+		]
+		self.assertEqual(seqs, [1, 2, 3])
 
-	def test_na_alt_when_no_ground_reference(self) -> None:
-		from cansat_hw.radio.wire_protocol import RadioRuntimeState, build_telemetry_packet
+		# Forceer wrap.
+		st.tlm_seq = 0xFFFE
+		s1 = unpack_tlm(build_telemetry_packet(st, None, None)).seq
+		s2 = unpack_tlm(build_telemetry_packet(st, None, None)).seq
+		self.assertEqual(s1, 0xFFFF)
+		self.assertEqual(s2, 0)
+
+	def test_missing_sensors_decode_as_none(self) -> None:
+		from cansat_hw.radio.wire_protocol import (
+			RadioRuntimeState,
+			build_telemetry_packet,
+		)
+		from cansat_hw.telemetry.codec import unpack_tlm
 
 		st = RadioRuntimeState(mode="TEST")
 		st.test_start_monotonic = 0.0
-		# Geen ground_hpa → alt_m = NA, maar pressure/temp zijn er wel.
+		f = unpack_tlm(build_telemetry_packet(st, None, None, now_monotonic=1.0))
+		self.assertIsNone(f.alt_m)
+		self.assertIsNone(f.pressure_hpa)
+		self.assertIsNone(f.temp_c)
+		self.assertIsNone(f.heading_deg)
+		self.assertIsNone(f.sys_cal)
+
+	def test_no_ground_reference_yields_none_alt_but_has_pressure(self) -> None:
+		from cansat_hw.radio.wire_protocol import (
+			RadioRuntimeState,
+			build_telemetry_packet,
+		)
+		from cansat_hw.telemetry.codec import unpack_tlm
+
+		st = RadioRuntimeState(mode="TEST")
+		st.test_start_monotonic = 0.0
 		bme = _fake_bme(1013.0)
-		pkt = build_telemetry_packet(st, bme, None, now_monotonic=0.0)
-		parts = pkt.decode("utf-8").split()
-		self.assertEqual(parts[2], "NA")  # alt_m
-		self.assertNotEqual(parts[3], "NA")  # pressure_hpa
-		self.assertNotEqual(parts[4], "NA")  # temp_c
+		f = unpack_tlm(build_telemetry_packet(st, bme, None, now_monotonic=0.0))
+		self.assertIsNone(f.alt_m)
+		self.assertAlmostEqual(f.pressure_hpa, 1013.0, places=1)
+		self.assertAlmostEqual(f.temp_c, 20.0, places=1)
+
+	def test_utc_seconds_uses_wall_clock(self) -> None:
+		from cansat_hw.radio.wire_protocol import (
+			RadioRuntimeState,
+			build_telemetry_packet,
+		)
+		from cansat_hw.telemetry.codec import unpack_tlm
+
+		st = RadioRuntimeState(mode="TEST")
+		with patch(
+			"cansat_hw.radio.wire_protocol.time_mod.time",
+			return_value=1_700_000_123.456,
+		):
+			f = unpack_tlm(build_telemetry_packet(st, None, None))
+		self.assertEqual(f.utc_seconds, 1_700_000_123)
+		self.assertEqual(f.utc_ms, 456)
 
 
 class AltPrimeTest(unittest.TestCase):

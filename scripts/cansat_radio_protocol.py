@@ -384,7 +384,14 @@ def main() -> int:
 				tlm = build_telemetry_packet(state, bme280, bno055)
 				ok_tlm = rfm.send(tlm, keep_listening=True, destination=dest)
 				if args.verbose:
-					print("TLM ->", dest, ":", tlm.decode("utf-8", errors="replace"), "ok=", ok_tlm)
+					print(
+						"TLM ->",
+						dest,
+						f"seq={state.tlm_seq}",
+						f"({len(tlm)} B binary)",
+						"ok=",
+						ok_tlm,
+					)
 				elif not ok_tlm:
 					print("WARN: TLM TX failed (radio timeout)", file=sys.stderr)
 				test_mode_advance_tlm(state)

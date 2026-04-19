@@ -10,7 +10,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Optional, Tuple, Union
 
+from cansat_hw.telemetry.codec import (
+	FRAME_SIZE,
+	TagDetection,
+	mode_for_string,
+	pack_tlm,
+	state_for_mode_string,
+)
+
+# ``MAX_PAYLOAD`` blijft de harde grens van één RFM69-frame (chip-FIFO + 4 B
+# RadioHead-header). Binary TLM-frames zijn altijd exact ``FRAME_SIZE`` (= 60).
 MAX_PAYLOAD = 60
+assert FRAME_SIZE == MAX_PAYLOAD, (
+	"binary TLM frame size %d != MAX_PAYLOAD %d" % (FRAME_SIZE, MAX_PAYLOAD)
+)
 
 # Unix seconden — ruwe bandbreedte (2021 … ~2286)
 _MIN_UNIX_TS = 1_600_000_000
@@ -114,6 +127,10 @@ class RadioRuntimeState:
 	mission_iir: int = DEFAULT_MISSION_IIR
 	# Aantal samples per GET ALT (priming-burst voor het IIR-filter).
 	alt_prime_samples: int = DEFAULT_ALT_PRIME
+	# Volgnummer (uint16, wraps na 65535) voor binary TLM-frames. Wordt door
+	# ``build_telemetry_packet`` zelf opgehoogd; de Pico/laptop kan packet-loss
+	# detecteren door gaten in de reeks.
+	tlm_seq: int = field(default=0, repr=False)
 
 
 def _update_apogee(state: RadioRuntimeState, altitude_m: float, pressure_hpa: float) -> None:
@@ -360,13 +377,8 @@ def preflight_checks_minimal(
 	return missing
 
 
-def _fmt_or_na(value: Optional[float], fmt: str) -> str:
-	if value is None:
-		return "NA"
-	try:
-		return fmt % float(value)
-	except (TypeError, ValueError):
-		return "NA"
+# Conversie m/s² -> g (lineaire versnelling) voor het binary TLM-veld.
+_G_MS2 = 9.80665
 
 
 def build_telemetry_packet(
@@ -375,16 +387,33 @@ def build_telemetry_packet(
 	bno055: Any,
 	*,
 	now_monotonic: Optional[float] = None,
+	tags: Optional[List[TagDetection]] = None,
 ) -> bytes:
-	"""Bouw één TLM-pakket voor TEST/DEPLOYED (≤ MAX_PAYLOAD bytes).
+	"""Bouw één **binary** TLM-pakket (exact ``FRAME_SIZE`` = 60 bytes).
 
-	Formaat: ``TLM <dt_ms> <alt_m> <p_hpa> <T_c> <heading> <roll> <pitch> <sys_cal>``.
-	Ontbrekende sensoren leveren ``NA`` tokens in plaats van floats.
+	Layout en sentinels: zie :mod:`cansat_hw.telemetry.codec`. Het
+	``mode_state``-byte wordt afgeleid uit ``state.mode``; de flight-state
+	is voorlopig een vaste mapping per mode (Fase 8 zal die dynamisch maken).
+
+	De aanroeper (de radio-loop) is verantwoordelijk voor het zenden; deze
+	functie heeft géén radio-IO. ``state.tlm_seq`` wordt opgehoogd zodat
+	opeenvolgende calls oplopende sequentie-nummers krijgen (16-bit wrap).
 	"""
 	if now_monotonic is None:
 		now_monotonic = time_mod.monotonic()
-	start = state.test_start_monotonic if state.test_start_monotonic is not None else now_monotonic
-	dt_ms = int(max(0.0, now_monotonic - start) * 1000.0)
+
+	# UTC tijd: gebruik de wandklok (gezet via SET TIME / NTP). Als die nog
+	# niet plausibel is, blijven we functioneel — de Pico ziet dan gewoon een
+	# zinvol-ogend laag epoch en weet via de minimal preflight (TIME) dat de
+	# tijd bijgesteld moet worden.
+	now_wall = time_mod.time()
+	utc_seconds = int(now_wall)
+	utc_ms = int(round((now_wall - utc_seconds) * 1000.0))
+	if utc_ms >= 1000:
+		utc_seconds += 1
+		utc_ms = 0
+	if utc_ms < 0:
+		utc_ms = 0
 
 	alt_m: Optional[float] = None
 	p_hpa: Optional[float] = None
@@ -403,28 +432,76 @@ def build_telemetry_packet(
 	heading: Optional[float] = None
 	roll: Optional[float] = None
 	pitch: Optional[float] = None
+	ax_g: Optional[float] = None
+	ay_g: Optional[float] = None
+	az_g: Optional[float] = None
 	sys_cal: Optional[int] = None
+	gyro_cal: Optional[int] = None
+	accel_cal: Optional[int] = None
+	mag_cal: Optional[int] = None
 	if bno055 is not None:
 		try:
 			heading, roll, pitch = bno055.read_euler()
 		except Exception:  # noqa: BLE001
 			heading = roll = pitch = None
+		# Linear acceleration (m/s², zwaartekracht eruit) -> g voor TLM.
 		try:
-			sys_cal = int(bno055.calibration_status()[0])
+			ax_ms2, ay_ms2, az_ms2 = bno055.read_linear_acceleration()
+			ax_g = float(ax_ms2) / _G_MS2
+			ay_g = float(ay_ms2) / _G_MS2
+			az_g = float(az_ms2) / _G_MS2
 		except Exception:  # noqa: BLE001
-			sys_cal = None
+			ax_g = ay_g = az_g = None
+		try:
+			cs = bno055.calibration_status()
+			sys_cal = int(cs[0])
+			gyro_cal = int(cs[1])
+			accel_cal = int(cs[2])
+			mag_cal = int(cs[3])
+		except Exception:  # noqa: BLE001
+			sys_cal = gyro_cal = accel_cal = mag_cal = None
 
-	msg = "TLM %d %s %s %s %s %s %s %s" % (
-		dt_ms,
-		_fmt_or_na(alt_m, "%.2f"),
-		_fmt_or_na(p_hpa, "%.2f"),
-		_fmt_or_na(t_c, "%.1f"),
-		_fmt_or_na(heading, "%.1f"),
-		_fmt_or_na(roll, "%.1f"),
-		_fmt_or_na(pitch, "%.1f"),
-		"NA" if sys_cal is None else str(sys_cal),
+	# Onderdrukkingsregel om Lint-noise (now_monotonic ongebruikt) weg te krijgen.
+	# Hij is hier voor consistentie met de rest van de mode-loop én voor
+	# toekomstig gebruik (TEST-relatieve uptime in een EVT-veld bv.).
+	_ = now_monotonic
+
+	# Hoog seq na bouw zodat het volgnummer dat we packen het "huidige" frame
+	# representeert (1, 2, 3, ...). Bij wrap (>65535) gewoon terug naar 0.
+	state.tlm_seq = (int(state.tlm_seq) + 1) & 0xFFFF
+	seq = state.tlm_seq
+
+	frame = pack_tlm(
+		mode=mode_for_string(state.mode),
+		state=state_for_mode_string(state.mode),
+		seq=seq,
+		utc_seconds=utc_seconds,
+		utc_ms=utc_ms,
+		alt_m=alt_m,
+		pressure_hpa=p_hpa,
+		temp_c=t_c,
+		heading_deg=heading,
+		roll_deg=roll,
+		pitch_deg=pitch,
+		ax_g=ax_g,
+		ay_g=ay_g,
+		az_g=az_g,
+		# Gyro-rate is (nog) niet uit de BNO-driver te halen; reserveerd voor later.
+		gx_dps=None,
+		gy_dps=None,
+		gz_dps=None,
+		sys_cal=sys_cal,
+		gyro_cal=gyro_cal,
+		accel_cal=accel_cal,
+		mag_cal=mag_cal,
+		tags=tags,
 	)
-	return _truncate(msg.encode("utf-8", errors="replace"))
+	# pack_tlm garandeert FRAME_SIZE bytes; assert is goedkoop maar vangt
+	# regressies in de codec snel op.
+	if len(frame) != MAX_PAYLOAD:
+		# Truncate/pad als laatste vangnet — mag in de praktijk nooit gebeuren.
+		frame = (frame + b"\x00" * MAX_PAYLOAD)[:MAX_PAYLOAD]
+	return frame
 
 
 def test_mode_tick(
