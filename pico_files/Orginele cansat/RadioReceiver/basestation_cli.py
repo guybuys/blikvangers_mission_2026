@@ -224,7 +224,13 @@ def _parse_reply(text):
 	if kind == "MODE" and len(parts) >= 3:
 		return {"kind": "MODE", "mode": parts[2]}
 	if kind == "STATE" and len(parts) >= 3:
-		return {"kind": "STATE", "state": parts[2]}
+		# Optionele reason mee (Fase 8b): ``OK STATE LANDED IMPACT``. Zo
+		# weet de operator achteraf nog WAT de overgang triggerde.
+		return {
+			"kind": "STATE",
+			"state": parts[2],
+			"reason": parts[3] if len(parts) >= 4 else None,
+		}
 	if kind == "FREQ" and len(parts) >= 3:
 		return _try_floats({"kind": "FREQ"}, (("freq_mhz", parts[2]),))
 	if kind == "TIME" and len(parts) >= 3:

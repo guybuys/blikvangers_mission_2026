@@ -59,11 +59,18 @@ DEFAULT_LAND_HZ_M = 5.0
 #     ~5–10 g). 8 g balanceert detectie versus false positives door turbulentie.
 #   - LAND-STABLE: 5 s zonder hoogteverandering ⇒ rust gevonden — fail-safe
 #     voor zachte landingen die de impact-drempel niet halen.
-DEFAULT_ASCENT_ACC_G = 3.0
-DEFAULT_DEPLOY_FREEFALL_S = 0.5
-DEFAULT_DEPLOY_SHOCK_G = 5.0
-DEFAULT_LAND_IMPACT_G = 8.0
-DEFAULT_LAND_STABLE_S = 5.0
+#
+# Indoor-test-ervaring (apr-2026): drempels van 3 g / 0.5 s / 5 g triggerden
+# allemaal door simpel oppakken+neerzetten (oppakschok ≈ 3-5 g, korte hand-
+# beweging duurt ~0.5 s in vrije val, neerzet-tik ≈ 5-10 g). De huidige
+# defaults zijn daarom opgehoogd zodat GEWONE handelingen géén volledig
+# missie-sequence triggeren, terwijl een echte raket-launch er nog ruim
+# overheen gaat.
+DEFAULT_ASCENT_ACC_G = 6.0
+DEFAULT_DEPLOY_FREEFALL_S = 1.0
+DEFAULT_DEPLOY_SHOCK_G = 8.0
+DEFAULT_LAND_IMPACT_G = 12.0
+DEFAULT_LAND_STABLE_S = 8.0
 PREFLIGHT_MIN_FREE_MB = 500
 PREFLIGHT_BNO_SYS_MIN = 1
 # CAL GROUND: eerst ``state.alt_prime_samples`` warm-up reads om het IIR-filter
@@ -896,6 +903,7 @@ def handle_wire_line(
 	if su == "SET MODE CONFIG":
 		state.mode = "CONFIG"
 		state.flight_state = STATE_NONE
+		state.last_transition_reason = None
 		# MISSION/TEST → CONFIG: ruim de TLM-scheduler en session-dest op,
 		# anders blijft de Zero proberen telemetrie te pushen of stuurt hij
 		# bij een volgende mode-wissel meteen naar een verouderd node.
@@ -920,6 +928,8 @@ def handle_wire_line(
 		# Start altijd in PAD_IDLE bij overgang naar MISSION; de state-machine
 		# klimt vanaf hier op basis van autonome TLM-reads (mini-fase 7).
 		state.flight_state = STATE_PAD_IDLE
+		# Verse missie → vorige reason wissen.
+		state.last_transition_reason = None
 		# Apogee MOET resetten bij elke nieuwe missie, anders bestuurt de
 		# vorige sessie de DEPLOY-trigger. Voorbeeld: een vorige LANDED-run
 		# liet ``max_alt_m=5.08m`` achter; de volgende missie ziet meteen na
@@ -964,6 +974,7 @@ def handle_wire_line(
 		state.mode = "TEST"
 		# TEST is een vaste dry-run van DEPLOYED — geen state-machine.
 		state.flight_state = STATE_DEPLOYED
+		state.last_transition_reason = None
 		state.test_duration_s = duration
 		state.test_start_monotonic = now
 		state.test_deadline_monotonic = now + duration
@@ -1226,7 +1237,14 @@ def handle_wire_line(
 		return b"OK APOGEE RESET"
 
 	if su == "GET STATE":
-		return _truncate(("OK STATE %s" % state_name(state.flight_state)).encode("utf-8"))
+		# Hang de laatste transitie-reden mee zodat de operator achteraf nog
+		# weet WAT de overgang triggerde (ACC/ALT/FREEFALL/SHOCK/DESCENT/
+		# IMPACT/STABLE). Backwards-compat: oude parsers lezen ``OK STATE
+		# <NAME>`` en negeren extra tokens; de Pico-CLI parsed parts[3] mee.
+		base = "OK STATE %s" % state_name(state.flight_state)
+		if state.last_transition_reason:
+			base += " " + str(state.last_transition_reason)
+		return _truncate(base.encode("utf-8"))
 
 	if len(tokens) == 3 and tokens[0].upper() == "SET" and tokens[1].upper() == "STATE":
 		# Forceer een flight-state. Alleen in CONFIG bedoeld voor pre-staging
@@ -1238,6 +1256,11 @@ def handle_wire_line(
 		if new is None:
 			return b"ERR BAD STATE"
 		state.flight_state = int(new)
+		# Manuele override: oude transitie-reden wissen zodat een volgende
+		# GET STATE niet ten onrechte ``OK STATE <NEW> <STALE_REASON>``
+		# rapporteert (zou suggereren dat de IMU triggerde terwijl de
+		# operator zelf de state forceerde).
+		state.last_transition_reason = None
 		return _truncate(("OK STATE %s" % state_name(new)).encode("utf-8"))
 
 	if su == "PREFLIGHT":

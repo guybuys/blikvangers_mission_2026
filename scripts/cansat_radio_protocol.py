@@ -324,6 +324,7 @@ def main() -> int:
 		apply_mode_iir,
 		build_telemetry_packet,
 		handle_wire_line,
+		maybe_advance_flight_state,
 		test_mode_advance_tlm,
 		test_mode_end,
 		test_mode_tick,
@@ -367,6 +368,50 @@ def main() -> int:
 	# voortdurend bijgewerkt blijven, ook als de Pico tijdelijk uit range is.
 	sampler = SensorSampler(bme280=bme280, bno055=bno055)
 
+	def _emit_evt_state_if_changed() -> None:
+		"""Stuur ongevraagd ``EVT STATE <NAME> [<REASON>]`` als de state-
+		machine sinds de laatste aankondiging een transitie maakte. Wordt
+		zowel na elke sampler-tick als na een command-RX aangeroepen zodat
+		de operator real-time transities ziet, óók als er geen commando in
+		de cache zit. Idempotent — als ``flight_state ==
+		last_announced_flight_state`` doet hij niks.
+		"""
+		if state.flight_state == state.last_announced_flight_state:
+			return
+		# CONFIG → flight_state=NONE: niet over de lucht aankondigen.
+		# We loggen geen "EVT STATE NONE" — dat zou de basisstation-
+		# operator alleen verwarren. Wel intern de bookkeeping syncen
+		# zodat de eerstvolgende echte transitie (bv. MISSION → PAD_IDLE)
+		# opnieuw een delta toont.
+		from cansat_hw.telemetry.codec import STATE_NONE as _STATE_NONE
+		if state.flight_state == _STATE_NONE:
+			state.last_announced_flight_state = int(state.flight_state)
+			return
+		dest_evt = (
+			state.test_dest_node
+			if state.test_dest_node is not None
+			else args.dest
+		)
+		name = state_name(state.flight_state)
+		reason = state.last_transition_reason
+		if reason:
+			evt_state = ("EVT STATE %s %s" % (name, reason)).encode("utf-8")
+		else:
+			evt_state = ("EVT STATE %s" % name).encode("utf-8")
+		ok_evt = rfm.send(evt_state, keep_listening=True, destination=dest_evt)
+		if args.verbose or not ok_evt:
+			print(
+				"STATE -> %s%s (dest=%d ok=%s)"
+				% (
+					name,
+					(" %s" % reason) if reason else "",
+					dest_evt,
+					ok_evt,
+				)
+			)
+		log_manager.write_payload(evt_state)
+		state.last_announced_flight_state = int(state.flight_state)
+
 	try:
 		rfm.frequency_mhz = args.freq
 		rfm.encryption_key = key
@@ -408,6 +453,17 @@ def main() -> int:
 			# ~1 Hz (args.poll). Dat is voldoende voor de IMU-rolling-stats —
 			# de echte IMU-triggers komen pas na lift-off in MISSION.
 			sampler.tick(ground_hpa=state.ground_hpa)
+			# Multi-trigger evaluatie elke tick (≈5 Hz in MISSION/TEST,
+			# ≈1 Hz in CONFIG). Cruciaal: korte IMU-pieken tussen TLM-
+			# ticks (default 1 Hz) zouden anders gemist worden voor
+			# state-overgangen omdat ``build_telemetry_packet`` enkel bij
+			# een TLM-tick de evaluatie deed. ``maybe_advance_flight_state``
+			# is een no-op buiten MISSION.
+			maybe_advance_flight_state(state, sampler.snapshot)
+			# Als de state net gewijzigd is, EVT direct uitsturen. Geen
+			# wachten op een Pico-commando — anders zie je de transitie
+			# nooit aan operator-zijde (Pico zit dan op input()).
+			_emit_evt_state_if_changed()
 			send_tlm, end_test = test_mode_tick(state)
 			if end_test:
 				dest = state.test_dest_node if state.test_dest_node is not None else args.dest
@@ -535,36 +591,10 @@ def main() -> int:
 
 			# Flight-state-overgang? Stuur ongevraagd ``EVT STATE <NAME>
 			# [<REASON>]`` zodat het base station meteen kan reageren (UI,
-			# log). ``state.last_transition_reason`` is door de state-machine
-			# (multi-trigger Fase 8b) gezet en bevat ACC/ALT/FREEFALL/SHOCK/
-			# DESCENT/IMPACT/STABLE — zonder reden (None) sturen we de
-			# klassieke korte vorm zodat oude Pico-CLI-tools die ook
-			# nog parsen.
-			if state.flight_state != state.last_announced_flight_state:
-				dest_evt = (
-					state.test_dest_node
-					if state.test_dest_node is not None
-					else args.dest
-				)
-				name = state_name(state.flight_state)
-				reason = state.last_transition_reason
-				if reason:
-					evt_state = ("EVT STATE %s %s" % (name, reason)).encode("utf-8")
-				else:
-					evt_state = ("EVT STATE %s" % name).encode("utf-8")
-				ok_evt = rfm.send(evt_state, keep_listening=True, destination=dest_evt)
-				if args.verbose or not ok_evt:
-					print(
-						"STATE -> %s%s (dest=%d ok=%s)"
-						% (
-							name,
-							(" %s" % reason) if reason else "",
-							dest_evt,
-							ok_evt,
-						)
-					)
-				log_manager.write_payload(evt_state)
-				state.last_announced_flight_state = int(state.flight_state)
+			# log). De helper is idempotent en wordt ook na elke sampler-
+			# tick aangeroepen, dus deze call vangt alleen het geval dat
+			# de transitie net gebeurde door een command (bv. SET STATE).
+			_emit_evt_state_if_changed()
 
 			if state.pending_freq_mhz is not None and ok:
 				new_freq = float(state.pending_freq_mhz)
