@@ -3,10 +3,11 @@
 Een JSON-bestand (default ``config/camera/tag_registry.json``) bevat:
 
 * ``lens.focal_length_mm`` — effectieve brandpuntafstand van de telelens.
-* ``sensor.pixel_pitch_um`` — pitch per sensor-pixel. Voor de IMX477 (Pi HQ
-  camera) is dat 1.55 µm. Samen met de brandpuntafstand rekenen we hieruit
-  ``focal_length_px`` op **volle resolutie** uit — onafhankelijk van hoe
-  sterk we de frames voor de detector downscalen.
+* ``sensor.pixel_pitch_um`` — pitch per sensor-pixel. Voor de OV2311
+  (Arducam B0381 PiVariety NoIR mono, global shutter) is dat 3.0 µm. Samen
+  met de brandpuntafstand rekenen we hieruit ``focal_length_px`` op
+  **volle resolutie** uit — onafhankelijk van hoe sterk we de frames voor
+  de detector downscalen.
 * ``sensor.full_res_px`` — [W, H] van de native sensor, ter info en voor
   sanity-checks tegen ``Picamera2.create_still_configuration``.
 * ``tags`` — dict ``"<id>" -> {"size_mm": int, "label": str?}``. IDs worden
@@ -31,8 +32,8 @@ from typing import Dict, Mapping, Optional, Tuple
 # Default-waardes als het JSON-bestand ontbreekt of een veld mist. De main
 # loop kan dan nog steeds functioneren; de gebruiker ziet alleen een WARN.
 DEFAULT_FOCAL_LENGTH_MM = 25.0
-DEFAULT_PIXEL_PITCH_UM = 1.55
-DEFAULT_FULL_RES_PX: Tuple[int, int] = (4056, 3040)
+DEFAULT_PIXEL_PITCH_UM = 3.0  # OV2311 (Arducam B0381 PiVariety mono, global shutter)
+DEFAULT_FULL_RES_PX: Tuple[int, int] = (1600, 1300)  # OV2311 active array
 DEFAULT_TAG_SIZE_MM = 175  # 17.5 cm papierprints uit de voorbereidende tests
 
 
@@ -76,8 +77,8 @@ class TagRegistry:
 		"""Brandpuntafstand uitgedrukt in **full-res sensor-pixels**.
 
 		Afleiding: 1 mm = 1000 µm, en een pixel beslaat ``pixel_pitch_um`` µm.
-		Dus ``f_px = f_mm * 1000 / pixel_pitch_um``. Voor 25 mm / 1.55 µm =
-		~16129 px.
+		Dus ``f_px = f_mm * 1000 / pixel_pitch_um``. Voor 25 mm / 3.0 µm
+		(OV2311) = ~8333 px op volle resolutie.
 		"""
 
 		pp = float(self.pixel_pitch_um)

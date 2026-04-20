@@ -27,7 +27,7 @@ spec schrijft voor dat we daar CPU + warmte sparen.
 
 ```
          ┌─────────────────────────────┐
-         │ Picamera2 (4056×3040 capture)│
+         │ Picamera2 (1600×1300 capture)│
          └──────────────┬──────────────┘
                         │ RGB frame
                         ▼
@@ -72,6 +72,27 @@ Alle files staan onder
 | [`thread.py`](../src/cansat_hw/camera/thread.py) | `CameraThread` loop (capture→detect→buffer), activeerbaar per flight-state. |
 | [`hardware.py`](../src/cansat_hw/camera/hardware.py) | Lazy Picamera2 + OpenCV fabrieksfuncties (worden pas geïmporteerd als de camera effectief aan staat). |
 
+## Hardware-keuze: OV2311 (Arducam B0381 PiVariety NoIR mono)
+
+Voor 2026 hangt er een **Arducam B0381 — PiVariety 2 MP global-shutter
+NoIR mono module (OV2311)** aan de CSI-poort van de Zero. Relevante specs:
+
+| Parameter | Waarde | Waarom belangrijk |
+|---|---|---|
+| Active array | **1600 × 1300 px** (2 MP) | `full_res_px` in de registry; `Picamera2.create_still_configuration` rapporteert hetzelfde. |
+| Pixel pitch | **3,0 µm** | Bepaalt `focal_length_px`. Significant grover dan IMX477 (1,55 µm) — vereist een aparte registry-entry. |
+| Shutter | **Global** | Geen rolling-shutter "jelly" tijdens descent; randvoorwaarde voor scherpe AprilTag-corners onder rotatie + verticale snelheid. |
+| Sensor type | Mono (geen Bayer) | Geen demosaic-stap — direct grayscale uit, snellere AprilTag-pijplijn. |
+| Filter | NoIR (geen IR-cut) | Marginaal voordeel bij low-light / IR-illuminatie; voor de missie weinig effect. |
+| libcamera tuning | `arducam-pivariety_mono.json` | Moet apart op de Zero geïnstalleerd zijn — zie [Troubleshooting](#libcamera-tuning-file-ontbreekt). |
+
+> **Historisch**: vóór de switch stond de pipeline gericht op een
+> Pi HQ camera (IMX477, 4056×3040, 1,55 µm). Met dezelfde 25 mm lens gaf
+> dat `focal_length_px ≈ 16 129`. Met OV2311 is dat **~8 333 px** —
+> bijna een factor 2 verschil. Een onbijgewerkte registry rapporteert
+> dus afstanden die ~2× te groot zijn. Check altijd dat `tag_registry.json`
+> overeenkomt met de fysiek gemonteerde sensor.
+
 ## Tag-registry (`config/camera/tag_registry.json`)
 
 Per-ID fysieke afmetingen + lens- en sensor-parameters. Schema:
@@ -82,16 +103,16 @@ Per-ID fysieke afmetingen + lens- en sensor-parameters. Schema:
 		"focal_length_mm": 25.0
 	},
 	"sensor": {
-		"name": "IMX477 (Raspberry Pi HQ camera)",
-		"pixel_pitch_um": 1.55,
-		"full_res_px": [4056, 3040]
+		"name": "OV2311 (Arducam B0381 PiVariety NoIR mono, global shutter)",
+		"pixel_pitch_um": 3.0,
+		"full_res_px": [1600, 1300]
 	},
 	"tags": {
 		"26": { "size_mm": 4500, "label": "Grote missie-tag (4.5 m)" },
-		"1":  { "size_mm": 1500, "label": "Kleine missie-tag #1" },
-		"2":  { "size_mm": 1500 },
-		"3":  { "size_mm": 1500 },
-		"4":  { "size_mm": 1500 }
+		"1":  { "size_mm": 1100, "label": "Kleine missie-tag #1 (1.1 m, opgemeten)" },
+		"2":  { "size_mm": 1100 },
+		"3":  { "size_mm": 1100 },
+		"4":  { "size_mm": 1100 }
 	},
 	"default_size_mm": 175
 }
@@ -99,14 +120,16 @@ Per-ID fysieke afmetingen + lens- en sensor-parameters. Schema:
 
 - **`lens.focal_length_mm`**: de effectieve brandpuntafstand van de
   telelens. Voor 2026 is dat **25 mm**.
-- **`sensor.pixel_pitch_um`**: sensor-pixel pitch. De IMX477 (Pi HQ camera)
-  heeft **1.55 µm**. Samen met `focal_length_mm` rekent de registry intern
-  `focal_length_px = focal_length_mm × 1000 / pixel_pitch_um` uit — voor
-  25 mm / 1.55 µm = **~16 129 px** op volle resolutie.
-- **`tags`**: de IDs die we verwachten. De grote 4.5 m tag heeft ID 26; de
-  vier kleine 1.5 m tags hebben IDs 1–4.
+- **`sensor.pixel_pitch_um`**: sensor-pixel pitch. De OV2311 (Arducam
+  B0381 PiVariety) heeft **3,0 µm**. Samen met `focal_length_mm` rekent
+  de registry intern `focal_length_px = focal_length_mm × 1000 /
+  pixel_pitch_um` uit — voor 25 mm / 3,0 µm = **~8 333 px** op volle
+  resolutie.
+- **`tags`**: de IDs die we verwachten. De grote 4,5 m tag heeft ID 26;
+  de vier kleine **1,1 m** tags (opgemeten op het terrein, niet de
+  oorspronkelijke schatting van 1,5 m) hebben IDs 1–4.
 - **`default_size_mm`**: fallback voor onbekende IDs. Leerlingen printen
-  tests op papier als 17.5 cm tags (`default_size_mm = 175`).
+  tests op papier als 17,5 cm tags (`default_size_mm = 175`).
 
 De loader (`load_tag_registry`) is robuust: missende velden vervallen in
 defaults, een kapot/onleesbaar bestand leidt tot een volledig-default
@@ -168,22 +191,25 @@ radio-loop elke iteratie aanroept met `state.flight_state == DEPLOYED`.
 
 ### Detectie op gedownscalede frames
 
-De AprilTag-detector is O(pixels) — detectie op volle resolutie (4056×3040
-= 12 MP) duurt op een Zero 2 W al snel ~1 s per frame. Omdat we **grote**
-tags zoeken (4.5 m → vele duizenden pixels op korte afstand) kunnen we het
-frame safe downscalen tot ~1000 px breed:
+De AprilTag-detector is O(pixels). Op de OV2311 (1600×1300 = 2 MP) is
+volle-resolutie detectie op een Zero 2 W ruwweg ~150–300 ms per frame —
+significant beter dan op de eerder geplande IMX477 (4056×3040 = 12 MP,
+~1 s/frame). Omdat we toch **grote** tags zoeken (4,5 m → vele duizenden
+pixels op korte afstand) kunnen we het frame nog wat downscalen voor
+extra marge:
 
 ```
 target_fps      = 7.0 Hz
-detect_width    = 1014 px  (4× downscale van 4056)
+detect_width    = 1014 px  (~1.6× downscale van 1600)
 ```
 
 Corners worden daarna met `inv_scale = 1/scale` teruggeschaald naar full-
 res vóór de afstandsberekening, dus het resultaat is **invariant** onder
 de gekozen `detect_width`. Wie meer range wil inruilen voor minder fps:
-start met `--camera-detect-width 2028` (2× downscale) of zelfs
-`--camera-detect-width 4056` (no downscale) en meet de effectieve fps via
-`camera_thread.stats()["frames"]`.
+start met `--camera-detect-width 1600` (no downscale) en meet de
+effectieve fps via `camera_thread.stats()["frames"]`. Met de OV2311 is
+full-res detectie realistisch genoeg om standaard te overwegen — test op
+de Zero met de actieve mounting + scènepatroon.
 
 ## Integratie met de radio-service
 
@@ -194,7 +220,7 @@ Nieuwe CLI-args voor
 |---|---|---|
 | `--no-camera` | uit | Schakel de camera-thread uit (radio-only test). |
 | `--tag-registry PAD` | `config/camera/tag_registry.json` | Pad naar JSON registry. |
-| `--camera-resolution WxH` | `4056x3040` | Picamera2 capture-resolutie. |
+| `--camera-resolution WxH` | `4056x3040` | Picamera2 capture-resolutie. Override naar `1600x1300` voor de OV2311 (default is een legacy IMX477-waarde — mismatch geeft Picamera2-warnings maar geen fout, omdat libcamera de stream toch op de actieve sensor-array clipt). |
 | `--camera-detect-width PX` | `1014` | Downscale-breedte voor detectie. |
 | `--camera-fps HZ` | `7.0` | Bovengrens voor capture-frequentie. |
 | `--camera-tag-families F` | `tag36h11` | AprilTag-familie. |
@@ -288,10 +314,39 @@ Je hebt een te nieuwe NumPy. Pin naar `numpy<2` (dat is wat
 - Verifieer `focal_length_mm` in de registry — 25 mm is de missie-
   configuratie; een kortere lens (bv. 6 mm kit-lens) geeft totaal andere
   getallen.
-- Verifieer `pixel_pitch_um`: 1.55 voor IMX477. Voor andere sensors
-  (CSI Camera v2, v3, GS) is de pitch anders.
+- Verifieer `pixel_pitch_um`: **3,0 voor OV2311** (Arducam B0381
+  PiVariety, missie-2026), 1,55 voor IMX477 (HQ camera), ander voor
+  Camera v2 / v3. Een mismatch tussen registry en gemonteerde sensor is
+  de meest voorkomende oorzaak van factor-2-afwijkingen.
+- Verifieer dat de gemeten `tag_size_mm` in de registry overeenkomt met
+  de **fysieke** tag op het terrein. De kleine tags zijn opgemeten op
+  **1100 mm** (1,1 m), niet de oorspronkelijke schatting van 1,5 m.
 - Check dat `max_side_px` **op full-res** is: als je detecteert op een
   downscaled frame en vergeet terug te schalen, kom je er ongeveer een
   factor `detect_width/full_width` naast uit. De code in
   [`detector.py`](../src/cansat_hw/camera/detector.py) (`inv_scale`)
   doet dat al automatisch.
+
+### libcamera tuning-file ontbreekt
+Bij eerste run zie je mogelijk:
+
+```
+ERROR IPAProxy ipa_proxy.cpp:185 Configuration file
+  'arducam-pivariety_mono.json' not found for IPA module 'rpi/vc4'
+```
+
+Picamera2/libcamera detecteert de Arducam Pivariety-sensor wel (de
+camera werkt, libcamera valt terug op een generieke tuning), maar de
+beeld-tuning is suboptimaal. Fix:
+
+```bash
+# Op de Zero
+wget -O install_pivariety_pkgs.sh https://github.com/ArduCAM/Arducam-Pivariety-V4L2-Driver/releases/download/install_script/install_pivariety_pkgs.sh
+chmod +x install_pivariety_pkgs.sh
+./install_pivariety_pkgs.sh -p libcamera_apps
+./install_pivariety_pkgs.sh -p libcamera_dev
+```
+
+Of plaats handmatig `arducam-pivariety_mono.json` (vanaf de Arducam
+GitHub-repo) in `/usr/share/libcamera/ipa/raspberrypi/` en herstart de
+service.

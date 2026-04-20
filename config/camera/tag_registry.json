@@ -5,16 +5,17 @@
 		"_comment_focal": "Telelens voor CanSat 2026. 25 mm brandpuntafstand."
 	},
 	"sensor": {
-		"name": "IMX477 (Raspberry Pi HQ camera)",
-		"pixel_pitch_um": 1.55,
-		"full_res_px": [4056, 3040]
+		"name": "OV2311 (Arducam B0381 PiVariety NoIR mono, global shutter)",
+		"pixel_pitch_um": 3.0,
+		"full_res_px": [1600, 1300],
+		"_comment_sensor": "Arducam B0381 PiVariety 2MP global-shutter mono (NoIR). 1600x1300 actieve array, 3.0 µm pixel pitch. Met 25 mm lens => focal_length_px = 25 * 1000 / 3.0 ≈ 8333 px op volle resolutie."
 	},
 	"tags": {
 		"26": { "size_mm": 4500, "label": "Grote missie-tag (4.5 m)" },
-		"1":  { "size_mm": 1500, "label": "Kleine missie-tag #1 (1.5 m)" },
-		"2":  { "size_mm": 1500, "label": "Kleine missie-tag #2 (1.5 m)" },
-		"3":  { "size_mm": 1500, "label": "Kleine missie-tag #3 (1.5 m)" },
-		"4":  { "size_mm": 1500, "label": "Kleine missie-tag #4 (1.5 m)" }
+		"1":  { "size_mm": 1100, "label": "Kleine missie-tag #1 (1.1 m, opgemeten)" },
+		"2":  { "size_mm": 1100, "label": "Kleine missie-tag #2 (1.1 m, opgemeten)" },
+		"3":  { "size_mm": 1100, "label": "Kleine missie-tag #3 (1.1 m, opgemeten)" },
+		"4":  { "size_mm": 1100, "label": "Kleine missie-tag #4 (1.1 m, opgemeten)" }
 	},
 	"default_size_mm": 175,
 	"_comment_default": "Alle niet-geregistreerde IDs krijgen deze maat (17.5 cm papierprints)."

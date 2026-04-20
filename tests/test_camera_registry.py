@@ -28,10 +28,17 @@ class TestTagRegistry(unittest.TestCase):
 		reg = load_tag_registry(Path("/nonexistent/tag_registry.json"))
 		self.assertEqual(reg.focal_length_mm, DEFAULT_FOCAL_LENGTH_MM)
 
-	def test_focal_length_px_from_pitch(self) -> None:
+	def test_focal_length_px_from_pitch_imx477(self) -> None:
+		"""Sanity: pinhole-formule werkt ook voor andere sensors (IMX477 = 1.55 µm)."""
 		reg = TagRegistry(focal_length_mm=25.0, pixel_pitch_um=1.55)
 		# 25 mm * 1000 / 1.55 µm ≈ 16129 px
 		self.assertAlmostEqual(reg.focal_length_px, 25000.0 / 1.55, places=2)
+
+	def test_focal_length_px_from_pitch_ov2311(self) -> None:
+		"""Missie-config 2026: OV2311 (Arducam B0381 PiVariety) met 3.0 µm pitch."""
+		reg = TagRegistry(focal_length_mm=25.0, pixel_pitch_um=3.0)
+		# 25 mm * 1000 / 3.0 µm ≈ 8333 px
+		self.assertAlmostEqual(reg.focal_length_px, 25000.0 / 3.0, places=2)
 
 	def test_focal_length_px_zero_pitch(self) -> None:
 		reg = TagRegistry(focal_length_mm=25.0, pixel_pitch_um=0.0)
@@ -94,8 +101,12 @@ class TestTagRegistry(unittest.TestCase):
 		self.assertTrue(bundled.is_file(), f"missing bundled registry: {bundled}")
 		reg = load_tag_registry(bundled)
 		self.assertEqual(reg.size_mm_for(26), 4500)
-		self.assertEqual(reg.size_mm_for(1), 1500)
+		# Kleine missie-tags zijn opgemeten op 1.1 m (= 1100 mm).
+		self.assertEqual(reg.size_mm_for(1), 1100)
 		self.assertEqual(reg.size_mm_for(99), reg.default_size_mm)
+		# Sensor: OV2311 (Arducam B0381 PiVariety) — 3.0 µm pitch, 1600x1300 active.
+		self.assertEqual(reg.pixel_pitch_um, 3.0)
+		self.assertEqual(reg.full_res_px, (1600, 1300))
 
 
 if __name__ == "__main__":
