@@ -15,7 +15,8 @@
 		"1":  { "size_mm": 1100, "label": "Kleine missie-tag #1 (1.1 m, opgemeten)" },
 		"2":  { "size_mm": 1100, "label": "Kleine missie-tag #2 (1.1 m, opgemeten)" },
 		"3":  { "size_mm": 1100, "label": "Kleine missie-tag #3 (1.1 m, opgemeten)" },
-		"4":  { "size_mm": 1100, "label": "Kleine missie-tag #4 (1.1 m, opgemeten)" }
+		"4":  { "size_mm": 1100, "label": "Kleine missie-tag #4 (1.1 m, opgemeten)" },
+		"0":  { "size_mm": 80,   "label": "Papieren test-print ID 0 (8 cm) — NIET verwarren met de missie-tags" }
 	},
 	"default_size_mm": 175,
 	"_comment_default": "Alle niet-geregistreerde IDs krijgen deze maat (17.5 cm papierprints)."
