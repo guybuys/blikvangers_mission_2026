@@ -309,6 +309,26 @@ class ServoController:
 			return None
 		return self._write_pulse(idx, int(cal.stow_us))
 
+	def set_pulse(self, idx: int, us: int) -> int:
+		"""Schrijf een runtime-puls naar servo ``idx`` (1 of 2).
+
+		Bedoeld voor een closed-loop-regelaar (``GimbalLoop``) die per tick
+		een nieuwe doel-PWM berekent. Past dezelfde ``cal.clamp`` +
+		hardware-grenzen toe als :meth:`home_all` en :meth:`stow_all`, en
+		is **niet** toegestaan tijdens een tuning-sessie (gebruik daar
+		:meth:`set_us`). Vereist een actieve rail; anders raisen we
+		``RuntimeError`` zodat de caller het sample kan negeren i.p.v.
+		pulses naar een dode rail te queueen. Retourneert de effectief
+		geschreven µs (na clamp).
+		"""
+		if idx not in (1, 2):
+			raise ValueError("servo idx must be 1 or 2")
+		if self._tuning_active:
+			raise RuntimeError("set_pulse not allowed during tuning")
+		if not self._rail_on:
+			raise RuntimeError("rail off")
+		return self._write_pulse(idx, int(us))
+
 	def stow_all(self) -> Tuple[Optional[int], Optional[int]]:
 		"""Stow beide servo's; geeft ``(us1, us2)``, ``None`` als niet gecalibreerd."""
 		return (self.stow_servo(1), self.stow_servo(2))

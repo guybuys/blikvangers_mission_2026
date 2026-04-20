@@ -385,6 +385,10 @@ def _print_help_local():
 	print("  !shoot         CAM SHOOT — foto maken (JPEG op de Zero) + AprilTag-detectie (CONFIG)")
 	print("  !detect        CAM DETECT — zelfde, zonder foto op te slaan (CONFIG)")
 	print("  !camstats      GET CAMSTATS — thread-active, frames, saves, errors, detect-calls")
+	print("  !gimbal on     GIMBAL ON — zet closed-loop aan (regelt pas tijdens DEPLOYED)")
+	print("  !gimbal off    GIMBAL OFF — zet closed-loop uit (houdt laatste PWM vast)")
+	print("  !gimbal home   GIMBAL HOME — beide servo's naar center_us (CONFIG-only)")
+	print("  !gimbal status GET GIMBAL — enabled/primed/ticks/rejected/err/us-status")
 	print("  !log on [pad]  start JSONL-log (default cansat_<ts>.jsonl op Pico-flash)")
 	print("  !log off       sluit de huidige log af")
 	print("  !log status    toont of er gelogd wordt + pad")
@@ -587,6 +591,21 @@ def _handle_local(line: str) -> bool:
 		_send_and_wait_reply("CAM DETECT")
 	elif cmd == "!camstats":
 		_send_and_wait_reply("GET CAMSTATS")
+	elif cmd == "!gimbal":
+		if len(parts) < 2:
+			print("ERR: !gimbal [on|off|home|status]")
+			return True
+		gsub = parts[1].strip().lower()
+		if gsub == "on":
+			_send_and_wait_reply("GIMBAL ON")
+		elif gsub == "off":
+			_send_and_wait_reply("GIMBAL OFF")
+		elif gsub == "home":
+			_send_and_wait_reply("GIMBAL HOME")
+		elif gsub == "status":
+			_send_and_wait_reply("GET GIMBAL")
+		else:
+			print("ERR: !gimbal [on|off|home|status]")
 	elif cmd == "!servo":
 		if len(parts) < 2:
 			_run_servo_repl()

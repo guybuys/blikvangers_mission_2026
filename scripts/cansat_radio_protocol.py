@@ -256,6 +256,52 @@ def main() -> int:
 		help="Servo-rail enable-pin is active-low (rail aan = pin laag).",
 	)
 	p.add_argument(
+		"--gimbal-auto-enable",
+		action="store_true",
+		help="Zet de gimbal closed-loop al actief bij boot (i.p.v. te wachten op "
+		"GIMBAL ON over de radio). De loop regelt pas echt tijdens DEPLOYED; "
+		"in andere states blijft de rail uit via de state-policy. Default uit "
+		"zodat een verkeerd gemonteerde sensor niet direct aan de servo's trekt.",
+	)
+	p.add_argument(
+		"--gimbal-kx",
+		type=float,
+		default=200.0,
+		help="P-gain servo1 / gx-fout (µs per m/s²). Zelfde tuning-conventie "
+		"als scripts/gimbal_level.py; hoger = harder sturen (oscillatie-risico).",
+	)
+	p.add_argument(
+		"--gimbal-ky",
+		type=float,
+		default=200.0,
+		help="P-gain servo2 / gy-fout (µs per m/s²).",
+	)
+	p.add_argument(
+		"--gimbal-kix",
+		type=float,
+		default=20.0,
+		help="I-gain servo1 / gx-fout (µs per geïntegreerde fout·s). 0 = uit.",
+	)
+	p.add_argument(
+		"--gimbal-kiy",
+		type=float,
+		default=20.0,
+		help="I-gain servo2 / gy-fout (idem).",
+	)
+	p.add_argument(
+		"--gimbal-max-us-step",
+		type=int,
+		default=20,
+		help="Max µs per regeltick (≈5 Hz in MISSION/TEST → 100 µs/s). Verhogen "
+		"bij trage reactie; verlagen als de gimbal gaat tikken.",
+	)
+	p.add_argument(
+		"--gimbal-swap-axes",
+		action="store_true",
+		help="Ruil de gx→servo1 / gy→servo2 mapping om. Gebruik als de gimbal "
+		"in de verkeerde as corrigeert (makkelijker dan JSON-calibratie herschrijven).",
+	)
+	p.add_argument(
 		"--no-camera",
 		action="store_true",
 		help="Schakel de camera-thread uit (geen Picamera2/AprilTag, geen tags in TLM). "
@@ -401,6 +447,7 @@ def main() -> int:
 	)
 	from cansat_hw.sensors.sampler import SensorSampler
 	from cansat_hw.servos import (
+		GimbalLoop,
 		ServoAction,
 		ServoController,
 		action_for_shutdown,
@@ -491,6 +538,53 @@ def main() -> int:
 			"WARN: gimbal-cfg %s ontbreekt — servo-controller uit." % gimbal_cfg_path,
 			file=sys.stderr,
 		)
+
+	# Gimbal closed-loop-regelaar (Fase 9 active control). Vereist servo-
+	# calibratie (beide ``center_us``) én een BNO055 (gravity-reads). Zonder
+	# één van beide blijft de loop ``None`` en zijn GIMBAL-commando's
+	# onbeschikbaar (``ERR GMB NOHW``). De loop regelt pas echt wanneer (a)
+	# hij enabled is en (b) ``flight_state == DEPLOYED``; dat dubbele gate
+	# komt terug in de main-loop tick.
+	gimbal_loop: Optional[GimbalLoop] = None
+	if servo is not None and bno055 is not None:
+		cal1 = servo.calibration_for(1)
+		cal2 = servo.calibration_for(2)
+		if (
+			cal1 is not None
+			and cal2 is not None
+			and cal1.center_us is not None
+			and cal2.center_us is not None
+		):
+			gimbal_loop = GimbalLoop(
+				cal1=cal1,
+				cal2=cal2,
+				kx=float(args.gimbal_kx),
+				ky=float(args.gimbal_ky),
+				kix=float(args.gimbal_kix),
+				kiy=float(args.gimbal_kiy),
+				max_us_step=int(args.gimbal_max_us_step),
+				swap_control_axes=bool(args.gimbal_swap_axes),
+			)
+			if args.gimbal_auto_enable:
+				gimbal_loop.enable()
+			print(
+				"Gimbal-loop beschikbaar — kx=%.1f ky=%.1f kix=%.1f kiy=%.1f "
+				"step=%d µs/tick (%s)"
+				% (
+					float(args.gimbal_kx),
+					float(args.gimbal_ky),
+					float(args.gimbal_kix),
+					float(args.gimbal_kiy),
+					int(args.gimbal_max_us_step),
+					"auto-on" if args.gimbal_auto_enable else "off — !gimbal on om te activeren",
+				)
+			)
+		else:
+			print(
+				"WARN: gimbal-loop uit — servo-calibratie niet compleet "
+				"(center_us ontbreekt). Kalibreer via 'scripts/gimbal/servo_calibration.py'.",
+				file=sys.stderr,
+			)
 
 	# Camera-thread (Fase 9). Start alleen als --no-camera NIET meegegeven is
 	# én picamera2 + apriltag + cv2 allemaal importeerbaar zijn. Registry
@@ -769,6 +863,43 @@ def main() -> int:
 				camera_thread.set_active(
 					int(state.flight_state) == int(_STATE_DEPLOYED)
 				)
+			# Gimbal closed-loop tick. Drievoudige gate:
+			#   (a) loop bestaat (servo+BNO055+calibratie OK),
+			#   (b) loop is enabled (via CLI of GIMBAL ON),
+			#   (c) flight_state == DEPLOYED **en** rail staat aan.
+			# Zonder (c) zouden we tijdens PAD_IDLE/ASCENT al pulses
+			# schrijven — state-policy houdt de rail uit, maar we willen
+			# óók geen pulses op een dode rail queueen. Een I²C-read op de
+			# BNO kost ~1 ms; we doen 'm alleen als alle gates pass.
+			if (
+				gimbal_loop is not None
+				and gimbal_loop.enabled
+				and servo is not None
+				and servo.rail_on
+				and int(state.flight_state) == int(_STATE_DEPLOYED)
+			):
+				try:
+					grav = bno055.read_gravity() if bno055 is not None else None
+				except Exception:  # noqa: BLE001 — I²C fout mag de main loop niet slopen
+					grav = None
+				target = gimbal_loop.tick(
+					grav,
+					now_monotonic=time.monotonic(),
+				)
+				if target is not None and servo is not None:
+					try:
+						us1, us2 = target
+						g1 = servo.calibration_for(1)
+						g2 = servo.calibration_for(2)
+						if g1 is not None:
+							servo.set_pulse(1, int(us1))
+						if g2 is not None:
+							servo.set_pulse(2, int(us2))
+					except Exception as e:  # noqa: BLE001
+						print(
+							"WARN: gimbal write faalde: %s" % e,
+							file=sys.stderr,
+						)
 			# Tuning-watchdog: kapt een vergeten SERVO START na 60 s zodat de
 			# rail niet onbedoeld aan blijft staan en LiPo leegloopt.
 			if servo is not None:
@@ -871,6 +1002,7 @@ def main() -> int:
 					servo=servo,
 					camera_services=camera_services,
 					camera_thread=camera_thread,
+					gimbal_loop=gimbal_loop,
 				)
 				if args.verbose:
 					print("TX to  ", from_node, ":", reply.decode("utf-8", errors="replace"))

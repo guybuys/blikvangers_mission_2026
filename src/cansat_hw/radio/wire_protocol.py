@@ -426,6 +426,15 @@ _MISSION_ALWAYS_CMDS = frozenset(
 		"GET STATE",
 		"SERVO STATUS",  # alleen-lezen; geen rail/pulse-effect
 		"GET CAMSTATS",  # alleen-lezen; geen capture/pulse
+		# Gimbal-status en aan/uit-toggle mogen **wel** tijdens MISSION:
+		# de operator moet de closed-loop kunnen stilleggen als hij ziet
+		# dat de gimbal jaagt (of juist inschakelen na een vertraagde
+		# deploy). GIMBAL HOME is bewust **niet** toegestaan omdat dat
+		# rechtstreeks PWM schrijft en de autonome state-policy zou
+		# doorkruisen.
+		"GET GIMBAL",
+		"GIMBAL ON",
+		"GIMBAL OFF",
 		"SET MODE CONFIG",
 		"STOP RADIO",
 	}
@@ -443,6 +452,11 @@ _TEST_ALWAYS_CMDS = frozenset(
 		"GET STATE",
 		"SERVO STATUS",
 		"GET CAMSTATS",
+		# Zelfde reden als in MISSION: tijdens een dry-run wil je live
+		# kunnen toggelen om het regelgedrag te observeren.
+		"GET GIMBAL",
+		"GIMBAL ON",
+		"GIMBAL OFF",
 	}
 )
 
@@ -1157,6 +1171,87 @@ def _handle_cam_cmd(
 	return _truncate(b"ERR CAM BAD")
 
 
+def _format_gimbal_status(gimbal_loop: Optional[Any]) -> bytes:
+	"""``OK GIMBAL E=<on|off> P=<prim|cold> T=<ticks> R=<rejected> ...``.
+
+	Compacte status die in één 60-byte reply past. Laat bewust de PI-tuning
+	(kx/ky/…) achterwege — dat is een debug-commando en hoeft niet elk
+	tick. ``U1/U2`` = laatste geschreven PWM (µs); ``E1/E2`` = laatste
+	LPF-fout in cg (1/100 m/s²) zodat we onder het 60 B-limiet blijven.
+	"""
+	if gimbal_loop is None:
+		return _truncate(b"ERR GMB NOHW")
+	st = gimbal_loop.status()
+	ex = "NA" if st.last_err_x is None else ("%+d" % int(round(st.last_err_x * 100.0)))
+	ey = "NA" if st.last_err_y is None else ("%+d" % int(round(st.last_err_y * 100.0)))
+	u1 = "NA" if st.last_us1 is None else str(int(st.last_us1))
+	u2 = "NA" if st.last_us2 is None else str(int(st.last_us2))
+	msg = "OK GIMBAL E=%s P=%s T=%d R=%d EX=%s EY=%s U1=%s U2=%s" % (
+		"on" if st.enabled else "off",
+		"prim" if st.primed else "cold",
+		int(st.ticks),
+		int(st.rejected_samples),
+		ex,
+		ey,
+		u1,
+		u2,
+	)
+	return _truncate(msg.encode("utf-8"))
+
+
+def _handle_gimbal_cmd(
+	state: RadioRuntimeState,
+	gimbal_loop: Optional[Any],
+	controller: Optional[Any],
+	tokens: List[str],
+) -> bytes:
+	"""Dispatch ``GIMBAL ON|OFF|HOME``.
+
+	* ``GIMBAL ON/OFF``: zet de closed-loop-flag. Toegestaan in CONFIG,
+	  TEST én MISSION (de operator moet in nood kunnen deactiveren). De
+	  loop gebeurt pas écht iets als de main loop óók ``flight_state ==
+	  DEPLOYED`` ziet en de rail aan staat — die autonome policy blijft
+	  gelden. Zie ``docs/servo_tuning.md``.
+	* ``GIMBAL HOME``: stuurt beide servo's naar ``center_us``. Alleen in
+	  CONFIG omdat het rechtstreeks PWM schrijft en interfereert met een
+	  actieve MISSION/TEST-regellus. Reset ook de rate-limit referentie
+	  in de :class:`GimbalLoop` zodat een volgende enable schoon vertrekt.
+	"""
+	if gimbal_loop is None:
+		return _truncate(b"ERR GMB NOHW")
+	if len(tokens) < 2:
+		return _truncate(b"ERR GMB BAD")
+
+	sub = tokens[1].upper()
+	if sub == "ON":
+		gimbal_loop.enable()
+		return _truncate(b"OK GIMBAL ON")
+	if sub == "OFF":
+		gimbal_loop.disable()
+		return _truncate(b"OK GIMBAL OFF")
+	if sub == "HOME":
+		if state.mode != "CONFIG":
+			return _truncate(b"ERR GMB BUSY")
+		if controller is None:
+			return _truncate(b"ERR GMB NOSVO")
+		# Reset de loop-referentie en verkrijg de center-PWM via de
+		# ServoController (die ook de rail aan zet en clamps toepast —
+		# niet rechtstreeks via gimbal_loop zodat we bij afwezige
+		# calibratie dezelfde foutcodes krijgen als ``SERVO HOME``).
+		if controller.tuning_active:
+			return _truncate(b"ERR GMB TUNON")
+		try:
+			us1, us2 = controller.home_all()
+		except RuntimeError as e:
+			return _truncate(("ERR GMB %s" % e).encode("utf-8", errors="replace"))
+		if us1 is None or us2 is None:
+			return _truncate(b"ERR GMB NOCEN")
+		# Sync de loop-positie zodat rate-limit vanaf center rekent.
+		gimbal_loop.home_pulses()
+		return _truncate(("OK GIMBAL HOME US1=%d US2=%d" % (us1, us2)).encode("utf-8"))
+	return _truncate(b"ERR GMB BAD")
+
+
 def handle_wire_line(
 	rfm: Any,
 	state: RadioRuntimeState,
@@ -1169,6 +1264,7 @@ def handle_wire_line(
 	servo: Optional[Any] = None,
 	camera_services: Optional[Any] = None,
 	camera_thread: Optional[Any] = None,
+	gimbal_loop: Optional[Any] = None,
 ) -> bytes:
 	"""
 	Verwerk één payload-regel (zonder RadioHead-header).
@@ -1583,6 +1679,12 @@ def handle_wire_line(
 
 	if tokens and tokens[0].upper() == "CAM":
 		return _handle_cam_cmd(state, camera_services, camera_thread, tokens)
+
+	if su == "GET GIMBAL":
+		return _format_gimbal_status(gimbal_loop)
+
+	if tokens and tokens[0].upper() == "GIMBAL":
+		return _handle_gimbal_cmd(state, gimbal_loop, servo, tokens)
 
 	if su in ("READ BME280", "BME280"):
 		if bme280 is None:

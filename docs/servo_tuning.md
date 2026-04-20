@@ -218,6 +218,103 @@ bv. `ERR PRE TIME GND SVO`).
 
 ---
 
+## Closed-loop gimbal (Fase 9)
+
+Zodra de calibratie gezet is én er een BNO055 aan de I²C-bus hangt, kan
+de Zero-service een **P+I gimbal-stabilisatie** draaien die tijdens
+`DEPLOYED` beide servo's actief horizontaal houdt op basis van de
+sensor-zwaartekrachtvector. De regelaar leeft in
+[`src/cansat_hw/servos/gimbal_loop.py`](../src/cansat_hw/servos/gimbal_loop.py)
+en is een *pure* control-object: de main loop bepaalt de cadence en
+roept één keer per iteratie `tick(g)` aan met het laatste `read_gravity()`-
+sample. Hij zet pas PWM als:
+
+1. `GIMBAL ON` gezet is (of `--gimbal-auto-enable` bij boot),
+2. de `ServoController`-rail aan staat (autonoom via de state-policy),
+3. `flight_state == DEPLOYED` (in `PAD_IDLE/ASCENT/LANDED` gebeurt
+   niets — zelfde gate als de camera-thread).
+
+### Wire-commando's
+
+| Commando | Mode | Effect |
+|---|---|---|
+| `GIMBAL ON` | CONFIG, TEST, MISSION | Zet closed-loop aan. Reset de I-term zodat een nieuwe sessie schoon vertrekt. |
+| `GIMBAL OFF` | CONFIG, TEST, MISSION | Zet closed-loop uit. Laatste geschreven PWM blijft staan (rail beheert de state-policy). |
+| `GIMBAL HOME` | CONFIG | Rail aan + beide servo's naar `center_us` + reset rate-limit-vertrekpunt in de loop. `ERR GMB BUSY` buiten CONFIG. |
+| `GET GIMBAL` | overal | `OK GIMBAL E=<on\|off> P=<prim\|cold> T=<ticks> R=<rejected> EX=<cg> EY=<cg> U1=<µs> U2=<µs>`. `EX/EY` = laatste LPF-fout in 1/100 m/s² (cg) om onder 60 B te passen. |
+
+Reply-conventie: `OK GIMBAL …` / `ERR GMB …` (3-letter code zodat alles
+in de 60 B RFM69-payload past). `ERR GMB NOHW` betekent ofwel geen
+BNO055, ofwel geen `center_us` calibratie — start in beide gevallen bij
+de `SERVO`-flow.
+
+### Pico-shortcuts
+
+| Pico-commando | Wire-commando | Wanneer |
+|---|---|---|
+| `!gimbal on` | `GIMBAL ON` | Vóór `!test` of net na `SET MODE MISSION`. |
+| `!gimbal off` | `GIMBAL OFF` | Als de gimbal oscilleert of als je manueel wilt posen. |
+| `!gimbal home` | `GIMBAL HOME` | Visuele check in CONFIG — alle servo's naar center. |
+| `!gimbal status` | `GET GIMBAL` | Live-status tijdens tuning / dry-run. |
+
+### CLI-tuning op de Zero
+
+De service accepteert deze flags (bijv. in
+`/etc/systemd/system/cansat-radio-protocol.service.d/override.conf`):
+
+| Flag | Default | Betekenis |
+|---|---|---|
+| `--gimbal-auto-enable` | off | Start met `GIMBAL ON` direct bij boot. Default **uit**: een verkeerd gemonteerde sensor zou anders meteen aan de servo's trekken. |
+| `--gimbal-kx` | 200.0 | P-gain servo1 / gx-fout (µs per m/s²). |
+| `--gimbal-ky` | 200.0 | P-gain servo2 / gy-fout. |
+| `--gimbal-kix` | 20.0 | I-gain servo1. 0 = uit. |
+| `--gimbal-kiy` | 20.0 | I-gain servo2. 0 = uit. |
+| `--gimbal-max-us-step` | 20 | Max PWM-verandering per regeltick (~5 Hz → 100 µs/s). |
+| `--gimbal-swap-axes` | off | Ruil `gx→servo1 / gy→servo2` om (makkelijker dan re-kalibreren). |
+
+Tuning-conventie is identiek aan
+[`scripts/gimbal_level.py`](../scripts/gimbal_level.py); waardes
+kunnen 1-op-1 worden overgenomen van een succesvolle SSH-sessie.
+
+### Veiligheidsgrenzen (intern)
+
+De `GimbalLoop` verwerpt samples die niet vertrouwbaar zijn in plaats
+van er blind op te reageren:
+
+- **Norm-check**: `‖g‖` moet tussen 7.0 en 12.5 m/s² liggen
+  (filtert freefall + saturatie).
+- **Spike-check**: maximaal 2.5 m/s² verandering per tick in één as
+  (filtert kabel-glitches). Eerste sample zaait enkel de LPF.
+- **LPF**: α=0.85 op de raw-vector (verschuift naar 5 Hz tick-rate).
+- **Deadband**: ±0.10 m/s² op de P-term; de I-term integreert wél
+  door zodat kleine biassen toch wegregelen.
+- **Clamp**: elke PWM gaat door `ServoCal.clamp()` vóór het de rail
+  bereikt, net als bij `SERVO SET/HOME/STOW`.
+- **Rate-limit**: max `--gimbal-max-us-step` µs per tick, vanaf de
+  laatst-geschreven positie (niet vanaf center — zo slaat de gimbal
+  niet vol uit wanneer je `GIMBAL ON` terwijl hij ergens anders stond).
+
+`GET GIMBAL` laat de tellers zien (`T`=accepted ticks, `R`=rejected
+samples) — als `R` blijft oplopen terwijl `T` stilstaat, zit je sensor
+in saturatie of is de sensor-kabel niet geaard.
+
+### Verschil met `scripts/gimbal_level.py`
+
+`gimbal_level.py` blijft bestaan als **SSH-only standalone tool** voor
+offline tuning op de bank: het logt CSV, doet een warm-up, en kan op 50
+Hz draaien met pigpio direct. De Zero-service gebruikt dezelfde
+wiskunde, maar:
+
+* tikt in de main loop op ~5 Hz (gedeeld met RX/TX en state-machine),
+* leest gravity alleen wanneer alle drie de gates open staan,
+* laat de rail-beheersing aan de state-policy,
+* heeft geen warm-up nodig (zero-target: "waterpas" = `gx=gy=0`).
+
+Gebruik `gimbal_level.py` om nieuwe `kx/ky/kix/kiy`-waardes te vinden,
+neem die over als `--gimbal-…`-flags in de service.
+
+---
+
 ## Troubleshooting
 
 | Symptoom | Meest waarschijnlijke oorzaak | Fix |
@@ -230,6 +327,10 @@ bv. `ERR PRE TIME GND SVO`).
 | Tuning negeert de MIN/MAX limieten | Gewenst: tuning gebruikt alleen de hardware-cap 500..2500 µs zodat je een ruimere range kunt zoeken | Buiten tuning (HOME/STOW/PARK/mission) blijft de cal-clamp wel actief |
 | Servo snap't bij `!home` hard terug | Normaal: HOME stuurt met max torque naar center — niet een bug | Zorg dat er mechanisch niets in de weg zit; doe eerst `!servo status` om de huidige positie te zien |
 | `SERVO PARK` reply = `ERR SVO NOSTOW` | `stow_us` ontbreekt voor één of beide servo's | Start `!servo`, druk op `w` bij een veilige positie voor beide servo's, `s` om te saven |
+| `!gimbal on` reply = `ERR GMB NOHW` | Geen BNO055 **of** calibratie mist `center_us` | Check service-log: "Gimbal-loop beschikbaar …" moet bij boot staan. Zo niet: `!preflight`, kalibreer servo's opnieuw, of check de BNO055-bedrading |
+| `GET GIMBAL` toont `R` oplopend, `T` stil | Gravity-samples worden verworpen (norm of spike) | BNO055-sensor in saturatie (hevige trillingen) of kabel los — `GIMBAL OFF`, debug sensor, daarna opnieuw `ON` |
+| Gimbal jaagt / oscilleert in DEPLOYED | `--gimbal-kx` / `--gimbal-ky` te hoog | Begin met `!gimbal off`, halveer de gain in de service-override, reboot de service, test met `!test 30` |
+| Gimbal corrigeert in verkeerde as | Sensor-frame ≠ gimbal-frame | Gebruik `--gimbal-swap-axes` (of negatief `kx`/`ky`) i.p.v. kalibratie opnieuw te doen |
 
 ---
 

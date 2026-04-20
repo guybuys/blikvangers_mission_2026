@@ -67,6 +67,9 @@ Op de **CanSat (Zero 2 W)** draait `cansat_radio_protocol.py` **zonder** toetsen
 | `!shoot` | Stuurt `CAM SHOOT` — één foto als JPEG op de Zero (`--photo-dir`, default `~/photos/cam_<HHMMSSZ>.jpg`) + AprilTag-detectie. Reply: `OK SHOOT <file> <WxH> T=<n> [<id>=<cm> <id>=<cm>]`. CONFIG-only; `ERR CAM BUSY` als de camera-thread draait (DEPLOYED). |
 | `!detect` | Stuurt `CAM DETECT` — capture + AprilTag zonder JPEG op te slaan. Snelle "zie je tag X op afstand Y?" check. Zelfde reply-format minus filename. |
 | `!camstats` | Stuurt `GET CAMSTATS` — thread-active, frames, saves, errors, detect-call-teller. Alleen-lezen, ook in MISSION toegelaten. |
+| `!gimbal on` / `!gimbal off` | Stuurt `GIMBAL ON` / `GIMBAL OFF` — zet de closed-loop-stabilisatie aan/uit. Ook in MISSION/TEST toegelaten zodat je de loop live kan stilleggen als hij oscilleert. De regelaar schrijft pas echt pulses als `flight_state == DEPLOYED` én de rail aan staat. |
+| `!gimbal home` | Stuurt `GIMBAL HOME` — rail aan + beide servo's naar `center_us` + reset de rate-limit-referentie in de loop. CONFIG-only; `ERR GMB BUSY` in MISSION/TEST. |
+| `!gimbal status` | Stuurt `GET GIMBAL` — compacte status: enabled/primed/tick-count/rejected-count/laatste fout (cg) en laatste PWM. Alleen-lezen. |
 
 > Voor de volledige multi-trigger view (nieuwe IMU+altitude-drempels)
 > typ je `GET TRIG ALL` rechtstreeks — er is geen `!trig…`-shortcut op
