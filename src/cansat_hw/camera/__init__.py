@@ -36,6 +36,12 @@ from .registry import (
 	TagRegistry,
 	load_tag_registry,
 )
+from .services import (
+	CameraServices,
+	SaveFn,
+	ShootResult,
+	make_opencv_jpeg_save_fn,
+)
 from .thread import (
 	DEFAULT_DETECT_WIDTH,
 	DEFAULT_TARGET_FPS,
@@ -45,6 +51,7 @@ from .thread import (
 __all__ = [
 	"AprilTagDetector",
 	"BufferedDetection",
+	"CameraServices",
 	"CameraThread",
 	"CameraUnavailable",
 	"DEFAULT_DETECT_WIDTH",
@@ -53,11 +60,14 @@ __all__ = [
 	"DEFAULT_TAG_SIZE_MM",
 	"DEFAULT_TARGET_FPS",
 	"DetectorMetrics",
+	"SaveFn",
+	"ShootResult",
 	"TagBuffer",
 	"TagInfo",
 	"TagRegistry",
 	"compute_metrics",
 	"load_apriltag_detector",
 	"load_tag_registry",
+	"make_opencv_jpeg_save_fn",
 	"metrics_to_buffered",
 ]

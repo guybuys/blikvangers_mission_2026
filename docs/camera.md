@@ -224,6 +224,7 @@ Nieuwe CLI-args voor
 | `--camera-detect-width PX` | `1014` | Downscale-breedte voor detectie. |
 | `--camera-fps HZ` | `7.0` | Bovengrens voor capture-frequentie. |
 | `--camera-tag-families F` | `tag36h11` | AprilTag-familie. |
+| `--deploy-save-every-n N` | `7` | Sla tijdens DEPLOYED elke N-de full-res frame als JPEG op in `--photo-dir`. Bij 7 Hz ≈ 1 foto/s. `0` = uit. Dat is de fallback waarmee we achteraf kunnen zien wát de camera zag als er géén tags in de TLM verschenen. |
 
 Per iteratie van de main loop:
 
@@ -238,6 +239,44 @@ De `snapshot()` retourneert een lege lijst zodra de buffer stale is
 (geen verse frames > 2 s) of gecleared werd bij `set_active(False)`. Dus
 zelfs als de thread nog even nauwelijks frames haalt tussen twee
 `DEPLOYED → LANDED`-ticks in, zie je geen "ghost tags" in de TLM.
+
+### Synchrone CONFIG-mode commando's (``!shoot`` / ``!detect``)
+
+Naast de thread bestaat er een **synchrone** camera-service die in CONFIG
+draait — bedoeld om vóór een missie te checken of de camera überhaupt
+tags ziet, op welke afstand, en om JPEGs op de Zero te zetten voor
+handmatige review. De service deelt `capture_fn`, `preprocess_fn`,
+`detector` en `registry` met de thread zodat de afstandsmath identiek is.
+
+| Radio-commando | Pico-CLI | Gedrag | Voorbeeld-reply (≤ 60 B) |
+|---|---|---|---|
+| `CAM SHOOT` | `!shoot` | 1 frame capturen, JPEG wegschrijven, AprilTags detecteren. | `OK SHOOT cam_214530Z.jpg 1600x1300 T=2 1=1234 3=2345` |
+| `CAM DETECT` | `!detect` | 1 frame capturen, AprilTags detecteren, **niet** opslaan. | `OK DETECT 1600x1300 T=1 1=1234` |
+| `GET CAMSTATS` | `!camstats` | Thread-diagnose + service-counters. | `OK CAMSTATS A=off F=420 S=60 E=0 D=7` |
+
+Per tag: `<id>=<afstand_cm>`, gesorteerd op grootste `max_side_px`
+(topdetectie eerst). Max 2 tags in de reply zodat we binnen 60 byte
+blijven. Geen tags? Dan zie je `T=0` en kun je via `!shoot` → rsync de
+JPEG ophalen om te zien waarom (te ver, scheef, reflectie, …).
+
+**Guard-rails:**
+
+* Alleen in CONFIG. In MISSION/TEST krijg je `ERR BUSY <MODE>` via de
+  normale allowlist — de missie-TLM-loop is heilig.
+* Als de `CameraThread` **actief** is (dus we zitten in DEPLOYED, bv. via
+  `SET STATE DEPLOYED` uit CONFIG voor een klas-demo) krijgt de operator
+  `ERR CAM BUSY` zodat we geen concurrent Picamera2-access krijgen.
+  Debug-foto's tijdens de echte DEPLOYED-fase komen van de thread zelf
+  (zie `--deploy-save-every-n` hierboven).
+* Zonder camera-hardware (`--no-camera`, of Picamera2/OpenCV niet
+  geïnstalleerd): `ERR CAM NOHW`.
+* Capture/detect/save-fouten: `ERR CAM <kort bericht>`.
+
+Foto's krijgen een korte naam `cam_<HHMMSSZ>.jpg` (bv.
+`cam_214530Z.jpg`); bij twee shots binnen dezelfde seconde volgt een
+`_N` suffix. Thread-fallback-foto's krijgen de langere
+`deploy_<UTCdate>T<HHMMSSZ>_<frame>[_tags-..].jpg` zodat een ls
+chronologisch + zelfdocumenterend is.
 
 ## Gracieus gedrag bij ontbrekende hardware
 

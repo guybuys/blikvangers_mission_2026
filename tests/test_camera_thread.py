@@ -153,6 +153,103 @@ class TestCameraThread(unittest.TestCase):
 		self.assertIsNotNone(cam._thread)
 		self.assertFalse(cam._thread.is_alive() if cam._thread else False)
 
+	def test_save_every_n_writes_frames_with_tag_suffix(self) -> None:
+		"""Elke N-de frame → save_fn wordt met frame+path aangeroepen."""
+
+		import tempfile
+
+		det = FakeDetector(
+			[[(1, _square_corners(2028.0, 1520.0, 100.0))] for _ in range(5)]
+		)
+		sentinel_frame = object()
+		saved: list = []
+
+		def save_fn(frame: Any, path) -> None:
+			saved.append((frame, path))
+
+		with tempfile.TemporaryDirectory() as td:
+			from pathlib import Path as _P
+
+			cam = CameraThread(
+				buffer=self.buf,
+				registry=self.reg,
+				capture_fn=_identity_capture(sentinel_frame, 4056, 3040),
+				preprocess_fn=_identity_preprocess,
+				detector=det,
+				target_fps=100.0,
+				save_every_n_frames=2,
+				save_dir=_P(td),
+				save_fn=save_fn,
+			)
+			# 4 iteraties → frames 2 en 4 worden gesaved (elke 2de).
+			for _ in range(4):
+				cam.run_once()
+			self.assertEqual(len(saved), 2)
+			for frame, path in saved:
+				self.assertIs(frame, sentinel_frame)
+				self.assertTrue(path.name.endswith(".jpg"))
+				self.assertTrue(path.name.startswith("deploy_"))
+				self.assertIn("_tags-1", path.name)
+			self.assertEqual(cam.stats()["saved"], 2)
+			self.assertEqual(cam.stats()["save_errors"], 0)
+
+	def test_save_off_when_every_n_zero(self) -> None:
+		import tempfile
+
+		det = FakeDetector([[(1, _square_corners(2028.0, 1520.0, 100.0))]] * 3)
+		saved: list = []
+
+		def save_fn(frame: Any, path) -> None:
+			saved.append(path)
+
+		with tempfile.TemporaryDirectory() as td:
+			from pathlib import Path as _P
+
+			cam = CameraThread(
+				buffer=self.buf,
+				registry=self.reg,
+				capture_fn=_identity_capture(object(), 4056, 3040),
+				preprocess_fn=_identity_preprocess,
+				detector=det,
+				target_fps=100.0,
+				save_every_n_frames=0,
+				save_dir=_P(td),
+				save_fn=save_fn,
+			)
+			for _ in range(3):
+				cam.run_once()
+			self.assertEqual(saved, [])
+			self.assertEqual(cam.stats()["saved"], 0)
+
+	def test_save_errors_counted_without_stopping_detect(self) -> None:
+		import tempfile
+
+		det = FakeDetector([[(1, _square_corners(2028.0, 1520.0, 100.0))]] * 2)
+
+		def bad_save(frame: Any, path) -> None:
+			raise OSError("disk full")
+
+		with tempfile.TemporaryDirectory() as td:
+			from pathlib import Path as _P
+
+			cam = CameraThread(
+				buffer=self.buf,
+				registry=self.reg,
+				capture_fn=_identity_capture(object(), 4056, 3040),
+				preprocess_fn=_identity_preprocess,
+				detector=det,
+				target_fps=100.0,
+				save_every_n_frames=1,
+				save_dir=_P(td),
+				save_fn=bad_save,
+			)
+			for _ in range(2):
+				cam.run_once()
+			# Detectie + buffer-publish moet nog steeds gelukt zijn.
+			self.assertEqual(cam.stats()["frames"], 2)
+			self.assertEqual(cam.stats()["saved"], 0)
+			self.assertEqual(cam.stats()["save_errors"], 2)
+
 	def test_inactive_pauses_loop(self) -> None:
 		"""Inactive thread moet niet tick'en."""
 

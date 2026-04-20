@@ -382,6 +382,9 @@ def _print_help_local():
 	print("  !servo status  toont rail/tuning/cur-us van de Zero-controller")
 	print("  !park          alias voor !servo park (snelle veilige stow)")
 	print("  !home          alias voor !servo home (centerstand vasthouden)")
+	print("  !shoot         CAM SHOOT — foto maken (JPEG op de Zero) + AprilTag-detectie (CONFIG)")
+	print("  !detect        CAM DETECT — zelfde, zonder foto op te slaan (CONFIG)")
+	print("  !camstats      GET CAMSTATS — thread-active, frames, saves, errors, detect-calls")
 	print("  !log on [pad]  start JSONL-log (default cansat_<ts>.jsonl op Pico-flash)")
 	print("  !log off       sluit de huidige log af")
 	print("  !log status    toont of er gelogd wordt + pad")
@@ -578,6 +581,12 @@ def _handle_local(line: str) -> bool:
 		_send_and_wait_reply("SERVO PARK")
 	elif cmd == "!home":
 		_send_and_wait_reply("SERVO HOME")
+	elif cmd == "!shoot":
+		_send_and_wait_reply("CAM SHOOT")
+	elif cmd == "!detect":
+		_send_and_wait_reply("CAM DETECT")
+	elif cmd == "!camstats":
+		_send_and_wait_reply("GET CAMSTATS")
 	elif cmd == "!servo":
 		if len(parts) < 2:
 			_run_servo_repl()

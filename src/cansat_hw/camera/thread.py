@@ -27,6 +27,7 @@ from __future__ import annotations
 import threading
 import time as time_mod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
 
 from .buffer import BufferedDetection, TagBuffer
@@ -53,6 +54,10 @@ DEFAULT_DETECT_WIDTH = 1014
 
 CaptureFn = Callable[[], Tuple[Any, Tuple[int, int]]]
 PreprocessFn = Callable[[Any, int], Tuple[Any, float]]
+# ``(frame, path) -> None`` — schrijft één frame als JPEG. Zelfde signatuur
+# als :data:`cansat_hw.camera.services.SaveFn`; lokaal gedefinieerd om een
+# circulaire import te vermijden (``services`` importeert uit ``thread``).
+SaveFn = Callable[[Any, Path], None]
 
 
 @dataclass
@@ -87,6 +92,15 @@ class CameraThread:
 	target_fps: float = DEFAULT_TARGET_FPS
 	detect_width: int = DEFAULT_DETECT_WIDTH
 	name: str = "camera-thread"
+	# -- optionele fallback: sla in DEPLOYED elke N-de frame als JPEG op
+	# zodat we achteraf kunnen debuggen waarom detectie faalde. ``0`` (default)
+	# = saves uit. ``save_dir`` moet dan ook gezet zijn én ``save_fn`` moet
+	# geinjecteerd zijn (typisch via
+	# :func:`cansat_hw.camera.services.make_opencv_jpeg_save_fn`).
+	save_every_n_frames: int = 0
+	save_dir: Optional[Path] = None
+	save_fn: Optional[SaveFn] = None
+	save_filename_prefix: str = "deploy_"
 
 	# -- interne state (niet door aanroeper instellen) -----------------------
 	_active: bool = field(default=False, init=False)
@@ -96,6 +110,8 @@ class CameraThread:
 	_frames: int = field(default=0, init=False)
 	_errors: int = field(default=0, init=False)
 	_last_error: Optional[str] = field(default=None, init=False)
+	_saved: int = field(default=0, init=False)
+	_save_errors: int = field(default=0, init=False)
 
 	# -- lifecycle -----------------------------------------------------------
 	def start(self) -> None:
@@ -155,6 +171,8 @@ class CameraThread:
 				"errors": int(self._errors),
 				"last_error": self._last_error,
 				"active": bool(self._active),
+				"saved": int(self._saved),
+				"save_errors": int(self._save_errors),
 			}
 
 	# -- main loop -----------------------------------------------------------
@@ -210,6 +228,53 @@ class CameraThread:
 		self.buffer.update(buffered, now=now)
 		with self._cond:
 			self._frames += 1
+			frame_idx = self._frames
+		# Save-fallback: elke N-de frame (vanaf de 1ste) wegschrijven zodat
+		# we achteraf in ``photos/`` kunnen kijken waarom detectie faalde.
+		# Saven gebeurt nooit in de hot-path: staat uit tenzij de radio-
+		# service ``save_every_n_frames > 0`` én ``save_dir`` + ``save_fn``
+		# injecteert.
+		if (
+			self.save_every_n_frames > 0
+			and self.save_dir is not None
+			and self.save_fn is not None
+			and frame_idx % int(self.save_every_n_frames) == 0
+		):
+			try:
+				self.save_dir.mkdir(parents=True, exist_ok=True)
+				tag_suffix = (
+					"_tags-" + "-".join(str(b.detection.tag_id) for b in buffered)
+					if buffered
+					else ""
+				)
+				fname = self._build_save_filename(frame_idx, tag_suffix)
+				self.save_fn(frame, self.save_dir / fname)
+				with self._cond:
+					self._saved += 1
+			except Exception as e:  # noqa: BLE001 — save mag de detect-loop niet stoppen
+				with self._cond:
+					self._save_errors += 1
+					self._last_error = ("SAVE " + str(e))[:80]
+
+	def _build_save_filename(self, frame_idx: int, tag_suffix: str) -> str:
+		"""``deploy_<UTC>_<fidx>[_tags-..].jpg`` — compact + chronologisch.
+
+		Gebruikt UTC zodat de alfabetische volgorde = tijdsvolgorde,
+		handig bij rsync-fetch en ls.
+		"""
+
+		t = time_mod.gmtime()
+		return "%s%04d%02d%02dT%02d%02d%02dZ_%04d%s.jpg" % (
+			self.save_filename_prefix,
+			t.tm_year,
+			t.tm_mon,
+			t.tm_mday,
+			t.tm_hour,
+			t.tm_min,
+			t.tm_sec,
+			int(frame_idx) % 10000,
+			tag_suffix,
+		)
 
 	# Publieke alias zodat tests zonder threading één iteratie kunnen draaien.
 	def run_once(self) -> None:
@@ -222,4 +287,5 @@ __all__ = [
 	"CameraThread",
 	"CaptureFn",
 	"PreprocessFn",
+	"SaveFn",
 ]

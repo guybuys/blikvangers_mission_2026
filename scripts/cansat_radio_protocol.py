@@ -295,6 +295,15 @@ def main() -> int:
 		default="tag36h11",
 		help="AprilTag-familie voor de detector. Default tag36h11 (zoals de missie-tags).",
 	)
+	p.add_argument(
+		"--deploy-save-every-n",
+		type=int,
+		default=7,
+		metavar="N",
+		help="Sla tijdens DEPLOYED elke N-de frame als JPEG op in --photo-dir "
+		"(fallback voor detectie-debug als geen tag in TLM verschijnt). "
+		"Bij --camera-fps 7 Hz geeft N=7 ≈ 1 foto/seconde; 0 = uit. Default 7.",
+	)
 	args = p.parse_args()
 	if args.mission_tlm_interval < 0.1:
 		print("--mission-tlm-interval moet >= 0.1 s zijn", file=sys.stderr)
@@ -485,15 +494,18 @@ def main() -> int:
 	# wordt altijd geladen (ook als camera uit staat) zodat ``--tag-registry``-
 	# validatie transparant is; de buffer blijft dan gewoon leeg.
 	camera_thread = None
+	camera_services = None
 	tag_buffer = None
 	picam2_handle: Any = None
 	tag_registry_obj = None
 	from cansat_hw.camera import (
+		CameraServices,
 		CameraThread,
 		CameraUnavailable,
 		TagBuffer,
 		load_apriltag_detector,
 		load_tag_registry,
+		make_opencv_jpeg_save_fn,
 	)
 
 	tag_registry_path = Path(args.tag_registry).expanduser()
@@ -538,6 +550,16 @@ def main() -> int:
 					quad_decimate=2.0,
 				)
 				tag_buffer = TagBuffer()
+				# Shared JPEG-saver: zowel de thread (DEPLOYED fallback-saves
+				# elke N frames) als de services (synchrone ``CAM SHOOT`` in
+				# CONFIG) gebruiken hetzelfde cv2-pad. Zo is één cv2-import,
+				# één quality-setting, één foutpad.
+				photo_dir_path = Path(args.photo_dir).expanduser()
+				try:
+					jpeg_save_fn = make_opencv_jpeg_save_fn(quality=90)
+				except CameraUnavailable:
+					jpeg_save_fn = None
+				save_every = max(0, int(args.deploy_save_every_n))
 				camera_thread = CameraThread(
 					buffer=tag_buffer,
 					registry=tag_registry_obj,
@@ -546,16 +568,36 @@ def main() -> int:
 					detector=detector,
 					target_fps=float(args.camera_fps),
 					detect_width=int(args.camera_detect_width),
+					save_every_n_frames=save_every if jpeg_save_fn is not None else 0,
+					save_dir=photo_dir_path if jpeg_save_fn is not None else None,
+					save_fn=jpeg_save_fn,
 				)
 				camera_thread.start()
+				# Services-container voor synchrone CONFIG-commando's
+				# (``CAM SHOOT`` / ``CAM DETECT``). Deelt dezelfde capture +
+				# detector + registry als de thread; de wire-handler weigert
+				# met ``ERR CAM BUSY`` zolang de thread actief is (DEPLOYED),
+				# dus er is geen gelijktijdige toegang tot Picamera2.
+				camera_services = CameraServices(
+					capture_fn=capture_fn,
+					preprocess_fn=preprocess_fn,
+					detector=detector,
+					registry=tag_registry_obj,
+					photo_dir=photo_dir_path,
+					detect_width=int(args.camera_detect_width),
+					save_fn=jpeg_save_fn,
+				)
 				print(
-					"Camera-thread actief — %dx%d capture, %d px detect, %.1f fps cap, family=%s"
+					"Camera-thread actief — %dx%d capture, %d px detect, %.1f fps cap, "
+					"family=%s, save-every=%d (%s)"
 					% (
 						cam_w,
 						cam_h,
 						int(args.camera_detect_width),
 						float(args.camera_fps),
 						args.camera_tag_families,
+						save_every,
+						"uit" if jpeg_save_fn is None or save_every == 0 else photo_dir_path,
 					)
 				)
 			except CameraUnavailable as e:
@@ -564,6 +606,7 @@ def main() -> int:
 					file=sys.stderr,
 				)
 				camera_thread = None
+				camera_services = None
 				tag_buffer = None
 				picam2_handle = None
 			except Exception as e:  # noqa: BLE001
@@ -572,6 +615,7 @@ def main() -> int:
 					file=sys.stderr,
 				)
 				camera_thread = None
+				camera_services = None
 				tag_buffer = None
 				picam2_handle = None
 
@@ -820,6 +864,8 @@ def main() -> int:
 					photo_dir=args.photo_dir,
 					gimbal_cfg=args.gimbal_cfg,
 					servo=servo,
+					camera_services=camera_services,
+					camera_thread=camera_thread,
 				)
 				if args.verbose:
 					print("TX to  ", from_node, ":", reply.decode("utf-8", errors="replace"))

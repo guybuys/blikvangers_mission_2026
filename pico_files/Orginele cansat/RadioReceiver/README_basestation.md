@@ -64,6 +64,9 @@ Op de **CanSat (Zero 2 W)** draait `cansat_radio_protocol.py` **zonder** toetsen
 | `!servo home` / `!home` | Stuurt `SERVO HOME` — beide servo's naar `center_us`, rail blijft aan. |
 | `!servo park` / `!park` | Stuurt `SERVO PARK` — rail aan → `stow_us` → 800 ms wachten → rail uit. Veilige stow vóór transport / MISSION. |
 | `!servo stow` | Stuurt `SERVO STOW` — alleen naar `stow_us` (rail moet al aan staan). |
+| `!shoot` | Stuurt `CAM SHOOT` — één foto als JPEG op de Zero (`--photo-dir`, default `~/photos/cam_<HHMMSSZ>.jpg`) + AprilTag-detectie. Reply: `OK SHOOT <file> <WxH> T=<n> [<id>=<cm> <id>=<cm>]`. CONFIG-only; `ERR CAM BUSY` als de camera-thread draait (DEPLOYED). |
+| `!detect` | Stuurt `CAM DETECT` — capture + AprilTag zonder JPEG op te slaan. Snelle "zie je tag X op afstand Y?" check. Zelfde reply-format minus filename. |
+| `!camstats` | Stuurt `GET CAMSTATS` — thread-active, frames, saves, errors, detect-call-teller. Alleen-lezen, ook in MISSION toegelaten. |
 
 > Voor de volledige multi-trigger view (nieuwe IMU+altitude-drempels)
 > typ je `GET TRIG ALL` rechtstreeks — er is geen `!trig…`-shortcut op

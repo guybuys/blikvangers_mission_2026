@@ -425,6 +425,7 @@ _MISSION_ALWAYS_CMDS = frozenset(
 		"GET ALT PRIME",
 		"GET STATE",
 		"SERVO STATUS",  # alleen-lezen; geen rail/pulse-effect
+		"GET CAMSTATS",  # alleen-lezen; geen capture/pulse
 		"SET MODE CONFIG",
 		"STOP RADIO",
 	}
@@ -441,6 +442,7 @@ _TEST_ALWAYS_CMDS = frozenset(
 		"GET IIR",
 		"GET STATE",
 		"SERVO STATUS",
+		"GET CAMSTATS",
 	}
 )
 
@@ -1053,6 +1055,108 @@ def _handle_servo_cmd(
 	return _truncate(b"ERR SVO BAD")
 
 
+def _format_tag_list(detections: List[Any], *, top_n: int = 2) -> str:
+	"""Compacte ``<id>=<cm>`` representatie van tag-detecties voor 60-B replies.
+
+	We sorteren op ``max_side_px`` (grootste tag eerst) en nemen de top-N
+	om binnen de RFM69-frame-limiet te blijven. Afstand wordt in hele
+	centimeters gerapporteerd (``int16``-compat met TLM-codec) zodat de
+	operator meteen met !alt/!apogee kan vergelijken zonder unit-switch.
+	"""
+	if not detections:
+		return ""
+	ordered = sorted(
+		detections,
+		key=lambda m: float(getattr(m, "max_side_px", 0.0)),
+		reverse=True,
+	)[: max(1, int(top_n))]
+	parts = []
+	for m in ordered:
+		tid = int(getattr(m, "tag_id", 0)) & 0xFF
+		d_cm = int(round(float(getattr(m, "distance_m", 0.0)) * 100.0))
+		parts.append("%d=%d" % (tid, d_cm))
+	return " ".join(parts)
+
+
+def _format_camstats(
+	services: Optional[Any],
+	thread: Optional[Any],
+) -> bytes:
+	"""``OK CAMSTATS A=<on|off> F=<frames> S=<saved> E=<errors> D=<detects>``.
+
+	Laat leeg als er geen hardware is. ``A=`` = ``CameraThread.active``
+	(``off`` in CONFIG, ``on`` in DEPLOYED). ``F``/``S`` komen uit de
+	thread; ``D`` (synchrone ``CAM DETECT``-calls) uit de services.
+	"""
+	if services is None and thread is None:
+		return _truncate(b"ERR CAM NOHW")
+	tstats = thread.stats() if thread is not None else {}
+	sstats = services.stats() if services is not None else {}
+	active = "on" if tstats.get("active") else "off"
+	frames = int(tstats.get("frames", 0))
+	saved = int(tstats.get("saved", 0))
+	errors = int(tstats.get("errors", 0)) + int(sstats.get("errors", 0))
+	detects = int(sstats.get("detects", 0))
+	msg = "OK CAMSTATS A=%s F=%d S=%d E=%d D=%d" % (
+		active,
+		frames,
+		saved,
+		errors,
+		detects,
+	)
+	return _truncate(msg.encode("utf-8"))
+
+
+def _handle_cam_cmd(
+	state: RadioRuntimeState,
+	services: Optional[Any],
+	thread: Optional[Any],
+	tokens: List[str],
+) -> bytes:
+	"""Dispatch ``CAM SHOOT`` / ``CAM DETECT``. ``GET CAMSTATS`` loopt via
+	een aparte branch in :func:`handle_wire_line`.
+
+	Return-conventie: ``OK SHOOT …`` / ``OK DETECT …`` of ``ERR CAM …``.
+	CONFIG-only: de :class:`CameraThread` mag niet gelijktijdig draaien
+	(anders concurrent access op Picamera2). Als de thread actief staat —
+	d.w.z. we zitten in DEPLOYED — krijgt de operator ``ERR CAM BUSY``.
+	Debug-foto's tijdens DEPLOYED komen van de thread zelf (save-every-N).
+	"""
+	if services is None:
+		return _truncate(b"ERR CAM NOHW")
+	if len(tokens) < 2:
+		return _truncate(b"ERR CAM BAD")
+	if state.mode != "CONFIG":
+		return _truncate(b"ERR CAM BUSY")
+	if thread is not None and thread.is_active():
+		return _truncate(b"ERR CAM BUSY")
+
+	sub = tokens[1].upper()
+	if sub == "SHOOT":
+		try:
+			result = services.shoot_and_detect(save=True)
+		except RuntimeError as e:
+			return _truncate(("ERR CAM " + str(e))[:MAX_PAYLOAD].encode("utf-8", errors="replace"))
+		w, h = result.image_wh
+		name = result.path.name if result.path is not None else "-"
+		tag_str = _format_tag_list(result.detections, top_n=2)
+		body = "OK SHOOT %s %dx%d T=%d" % (name, int(w), int(h), len(result.detections))
+		if tag_str:
+			body = body + " " + tag_str
+		return _truncate(body.encode("utf-8"))
+	if sub == "DETECT":
+		try:
+			metrics, (w, h) = services.detect_once()
+		except RuntimeError as e:
+			return _truncate(("ERR CAM " + str(e))[:MAX_PAYLOAD].encode("utf-8", errors="replace"))
+		tag_str = _format_tag_list(metrics, top_n=2)
+		body = "OK DETECT %dx%d T=%d" % (int(w), int(h), len(metrics))
+		if tag_str:
+			body = body + " " + tag_str
+		return _truncate(body.encode("utf-8"))
+	return _truncate(b"ERR CAM BAD")
+
+
 def handle_wire_line(
 	rfm: Any,
 	state: RadioRuntimeState,
@@ -1063,6 +1167,8 @@ def handle_wire_line(
 	photo_dir: Optional[Union[str, Path]] = None,
 	gimbal_cfg: Optional[Union[str, Path]] = None,
 	servo: Optional[Any] = None,
+	camera_services: Optional[Any] = None,
+	camera_thread: Optional[Any] = None,
 ) -> bytes:
 	"""
 	Verwerk één payload-regel (zonder RadioHead-header).
@@ -1471,6 +1577,12 @@ def handle_wire_line(
 
 	if tokens and tokens[0].upper() == "SERVO":
 		return _handle_servo_cmd(state, servo, tokens)
+
+	if su == "GET CAMSTATS":
+		return _format_camstats(camera_services, camera_thread)
+
+	if tokens and tokens[0].upper() == "CAM":
+		return _handle_cam_cmd(state, camera_services, camera_thread, tokens)
 
 	if su in ("READ BME280", "BME280"):
 		if bme280 is None:
