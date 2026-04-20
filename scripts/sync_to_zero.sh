@@ -62,6 +62,18 @@ EXCLUDES=(
 	# Pico-firmware/CLI hoort niet op de Zero.
 	'pico_files/'
 
+	# Lokaal analyse-materiaal (fetch_zero_logs.sh + decode_logs.py + plots).
+	# ``zero_logs/`` is de Mac-kopie van ~/cansat_logs op de Zero; terug-
+	# syncen zou een tweede kopie op een ander pad zetten. De losse CSV/PNG-
+	# artifacten komen uit analyse-sessies op de Mac en horen niet thuis op
+	# de Zero. Zelfde patronen als in .gitignore — zo blijven git en rsync
+	# consistent.
+	'zero_logs/'
+	'continuous.csv'
+	'mission_*.png'
+	'mission_*.csv'
+	'test_*.png'
+
 	# Lokale dev artifacten.
 	'dist/'
 	'build/'
