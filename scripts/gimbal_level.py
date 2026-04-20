@@ -259,7 +259,10 @@ def main() -> int:
 			f"Calibration file not found: {cal_path}\n"
 			f"  Repo-root: {_ROOT}\n"
 			f"  Standaard: {_DEFAULT_CAL}\n"
-			f"  Tip: git pull (config/gimbal/) of: python3 scripts/gimbal_level.py --cal pad/naar/servo_calibration.json",
+			f"  Tip: per-hardware bestand, niet in git. Calibreer met"
+			f" 'python scripts/gimbal/servo_calibration.py' of geef expliciet"
+			f" --cal pad/naar/servo_calibration.json. Schema-voorbeeld:"
+			f" config/gimbal/servo_calibration.example.json.",
 			file=sys.stderr,
 		)
 		return 2

@@ -1,0 +1,18 @@
+{
+  "_README": "Voorbeeld-calibratie. Niet rechtstreeks gebruiken — kalibreer op je eigen hardware via scripts/gimbal/servo_calibration.py (SSH op de Zero) of via !servo over de radio. De echte file (config/gimbal/servo_calibration.json) leeft alleen op de Zero en is bewust uit git gehouden + uitgesloten in scripts/sync_to_zero.sh om mechanische strain bij verkeerde center_us / ontbrekende stow_us te voorkomen. Dit voorbeeld toont (a) het schema dat de loader (src/cansat_hw/servos/controller.py::_load_cal_dict) verwacht en (b) representatieve waarden voor de huidige RPITSM0-hardware (april 2026).",
+  "servo1": {
+    "gpio": 13,
+    "min_us": 750,
+    "center_us": 1100,
+    "max_us": 1450,
+    "stow_us": 1550
+  },
+  "servo2": {
+    "gpio": 12,
+    "min_us": 1750,
+    "center_us": 2100,
+    "max_us": 2500,
+    "stow_us": 2500
+  },
+  "saved_at": 1776695018
+}

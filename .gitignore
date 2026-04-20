@@ -34,5 +34,20 @@ zero_logs/
 # persistente RFM69-frequentie wissen en beide kanten op default 433 MHz
 # zetten waarna ze niet meer met elkaar kunnen praten).
 config/radio_runtime.json
+# Per-hardware gimbal-calibratie (gpio + min/center/max/stow_us). Leeft alleen
+# op de Zero en wordt daar live bewerkt via scripts/gimbal/servo_calibration.py
+# of !servo over de radio. Zie config/gimbal/servo_calibration.example.json
+# voor het schema. Bewust uit git om verkeerde center_us-waarden niet
+# accidenteel terug te kunnen pushen (incident 2026-04-19).
+config/gimbal/servo_calibration.json
 cansat_logs/
 photos/
+
+# Lokale analyse-output van mission/test-CSV's en plots (decode_logs.py,
+# matplotlib, gnuplot ...). Dit is dev-werkmateriaal dat per sessie verschilt
+# en niet in de repo hoort. Voeg eigen patronen toe als je andere namen
+# gebruikt.
+/continuous.csv
+/mission_*.png
+/mission_*.csv
+/test_*.png

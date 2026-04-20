@@ -49,6 +49,13 @@ EXCLUDES=(
 
 	# Zero-only runtime data — NIET overschrijven of wissen.
 	'config/radio_runtime.json'
+	# Gimbal-calibratie hoort bij de fysieke hardware (per-servo center/min/max
+	# en stow_us). Live-bewerkt op de Zero via SERVO STOW SET / scripts/gimbal/
+	# servo_calibration.py. De Mac-kopie in git is een referentie-template; door
+	# 'm hier uit te sluiten kan een sync nooit per ongeluk de gekalibreerde
+	# stow_us wegvegen of een mechanisch onveilige center_us terugzetten
+	# (zie incident 2026-04-19).
+	'config/gimbal/servo_calibration.json'
 	'cansat_logs/'
 	'photos/'
 
