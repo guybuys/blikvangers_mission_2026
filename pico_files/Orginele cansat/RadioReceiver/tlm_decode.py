@@ -218,9 +218,29 @@ def _fmt(v, fmt):
 	return fmt % v
 
 
+def _format_tag_brief(tag):
+	"""Compacte weergave van één tag-detectie: ``<id>@<dz>m`` (dz = optische as).
+
+	De Zero vult de tags-slots in **max_side_px-descending**-volgorde (grootste
+	tag eerst, zie :class:`cansat_hw.camera.buffer.TagBuffer`), dus de eerste
+	entry is automatisch de "meest prominente" tag.
+	"""
+	tid = tag.get("id")
+	dz = tag.get("dz_cm")
+	if dz is None:
+		return "%s@NAm" % (tid,)
+	return "%d@%.1fm" % (int(tid), float(dz) / 100.0)
+
+
 def format_tlm_short(d):
-	"""Eén-regelweergave voor de CLI tijdens TEST/MISSION-listen."""
-	return (
+	"""Eén-regelweergave voor de CLI tijdens TEST/MISSION-listen.
+
+	Toont naast ``tags=<N>`` ook de top-2 tags (ID + afstand in meter) zodat de
+	operator tijdens de missie direct ziet wélke tag gedetecteerd wordt en op
+	welke afstand — bv. ``tags=2 [26@12.3m 4@45.6m]``. De Zero garandeert dat
+	de lijst descending gesorteerd is op pixel-size (grootste eerst).
+	"""
+	base = (
 		"TLM seq=%d %s/%s utc=%d.%03d "
 		"alt=%s p=%s T=%s "
 		"hdg=%s r=%s p=%s "
@@ -247,3 +267,8 @@ def format_tlm_short(d):
 		"NA" if d["bno_mag_cal"] is None else str(d["bno_mag_cal"]),
 		d["tag_count"],
 	)
+	tags = d.get("tags") or []
+	if tags:
+		parts = [_format_tag_brief(t) for t in tags[:2]]
+		base += " [" + " ".join(parts) + "]"
+	return base

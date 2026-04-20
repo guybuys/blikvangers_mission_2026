@@ -134,6 +134,36 @@ class CrossSideRoundTripTest(unittest.TestCase):
 		self.assertNotIn("\n", line)
 		self.assertIn("seq=3", line)
 		self.assertIn("TEST/DEPLOYED", line)
+		# Zonder tags zien we enkel ``tags=0`` — géén extra ``[...]``-blok,
+		# zodat de regel in het 0-tag-geval even compact blijft als voorheen.
+		self.assertIn("tags=0", line)
+		self.assertNotIn("[", line)
+
+	def test_format_short_shows_top_tags_with_distance(self) -> None:
+		from cansat_hw.telemetry.codec import (
+			MODE_MISSION,
+			STATE_DEPLOYED,
+			TagDetection,
+			pack_tlm,
+		)
+
+		pico = _import_pico_decoder()
+		raw = pack_tlm(
+			mode=MODE_MISSION,
+			state=STATE_DEPLOYED,
+			seq=9,
+			utc_seconds=1_700_000_000,
+			utc_ms=0,
+			tags=[
+				TagDetection(tag_id=26, dx_cm=10, dy_cm=-5, dz_cm=1234, size_mm=4500),
+				TagDetection(tag_id=4, dx_cm=0, dy_cm=0, dz_cm=4567, size_mm=1100),
+			],
+		)
+		line = pico.format_tlm_short(pico.decode_tlm(raw))
+		self.assertIn("tags=2", line)
+		# Volgorde: grootste tag (pixel-size) eerst — hier de 4.5 m missie-
+		# tag. Afstand wordt in meter gerenderd (dz_cm / 100).
+		self.assertIn("[26@12.3m 4@45.7m]", line)
 
 
 if __name__ == "__main__":

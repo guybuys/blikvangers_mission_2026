@@ -77,7 +77,7 @@ Als de Pico in **`MISSION`** staat, kan de Zero intern in verschillende **substa
 | **`PAD_IDLE`** | **“Op het platform / in de raket, wachten”** — nog geen lancering gedetecteerd. | Vooral **BME280** (druk/temp) en **BNO055** (versnelling oriëntatie), **traag** (spaar energie). | **Geen** doorlopende uitzending naar het grondstation (spaar batterij). *Let op:* afstemmen met docenten of er in deze fase nog **korte luistervensters** nodig zijn voor veiligheid/commando’s. | **Uit** | **Uit** — servos naar een **veilige “ingeklapte” stand** (“**stowed**”) zodat niets beweegt in de raket. |
 | **`ASCENT`** | **“Stijgfase”** — we hebben een **lancering** herkend (raket gaat omhoog of CanSat krijgt sterke versnelling / drukverandering). | Zelfde sensoren, maar **sneller loggen** om de curve goed te vangen. Eventueel **camera al aanzetten** als die nodig is om de **deploy** (uitschieten van de CanSat) te herkennen. | Meer data richting Pico om later te verzenden of te bufferen (afhankelijk van jullie ontwerp). | **Aan** indien nodig voor detectie | Nog **geen** actieve gimbal; servos blijven veilig tenzij jullie anders afspreken. |
 | **`DEPLOYED`** | **“Uitgeschoten / vrij”** — de CanSat hangt of valt onder parachute; **missie metingen** lopen volop. | **Druk, hoogte-afgeleide, IMU, AprilTag** — alles wat jullie nodig hebben voor log en wedstrijd. | **Radio aan** — telemetrie naar grondstation. | **Aan** (film + tag-detectie) | **Servo’s aan**. Parameter **`gimbal_enable`**: als **aan** → **gimbal actief** (nivelleren); als **uit** (bv. drone-test) → servos naar een **vaste “missie-default”**-positie (niet dezelfde als ingeklapt op de pad) + **BNO055** blijft nuttig om **schudden/trillingen** te monitoren. |
-| **`LANDED`** | **“Geland — zoeken”** — de CanSat ligt op de grond; we willen vooral **gevonden worden**. | Minimaal (alleen wat nodig is voor een **alive**-signaal of eenvoudige status). | **Zelden** een kort **“ik leef nog”**-signaal (lange interval), liefst met **richtantenne** op het grondstation. | **Uit** (spaar stroom) | **Uit** — veilig, geen onnodige beweging. |
+| **`LANDED`** | **“Geland — zoeken”** — de CanSat ligt op de grond; we willen vooral **gevonden worden**. | Minimaal (alleen wat nodig is voor een **alive**-signaal of eenvoudige status). | **Zelden** een kort **“ik leef nog”**-signaal (lange interval), liefst met **richtantenne** op het grondstation. | **Uit** (spaar stroom) | **Rail uit, géén autonome beweging** — de cansat kan in gras/puin/ schuin liggen; stowen forceert servo's tegen obstakels. Operator kan na recovery `!servo park` sturen. |
 
 **Geheugensteuntje voor benamingen ibn the English:**
 
@@ -265,15 +265,18 @@ state-advance). Samengevat:
 | Flight-state | Servo-rail | Gedrag |
 |---|---|---|
 | `NONE` (CONFIG) | **uit tenzij operator** `SERVO ENABLE/HOME/...` geeft | Alleen handmatige controle; watchdog kapt tuning na 5 min. |
-| `PAD_IDLE` | **uit** | Raket staat op de pad; servo's mechanisch in stow vóór MISSION. |
+| `PAD_IDLE` | **uit** | Raket staat op de pad; servo's mechanisch in stow vóór MISSION (PARK bij CONFIG→MISSION). |
 | `ASCENT` | **uit** | Motor-burn; gimbal niet actief. |
-| `DEPLOYED` | **aan** | Gimbal-loop (Fase 9) zal hier positie-aansturing overnemen. |
-| `LANDED` | **stow → uit** (via PARK-sequence) | Beveilig mechaniek, zet rail af voor zoek-fase. |
-| `DEPLOYED` (TEST) | **aan** | Dry-run pusht TLM, rail aan zodat je de gimbal in de lucht kunt testen. |
+| `DEPLOYED` | **aan + HOME** | ASCENT→DEPLOYED roept `home_all()` zodat de gimbal vanaf `center_us` vertrekt (niet slap-zonder-puls). Fase 9 neemt daarna positie-aansturing over. |
+| `LANDED` | **rail uit, géén beweging** | Na impact kan de gimbal in gras/puin liggen; autonoom stowen zou servo's tegen een obstakel forceren. Enkel de rail wordt uitgezet; operator stuurt `!servo park` bij recovery indien gewenst. |
+| `DEPLOYED` (TEST) | **aan + HOME** | Dry-run met zelfde actie als DEPLOYED — rail aan én servo's actief in `center_us` zodat je visueel kunt valideren dat de gimbal reageert. |
+| `TEST → CONFIG` | **rail uit, géén beweging** | Einde van de dry-run laat de gimbal in zijn huidige positie staan (typisch home) voor inspectie; geen stow-terugval meer. Operator kan expliciet `!servo park` sturen indien wel gewenst. |
 
 Bij service-shutdown (SIGTERM van systemd) stuurt dezelfde helper
 `action_for_shutdown()` → `PARK` (stow + rail uit) zodat nooit een
-actieve servo achterblijft.
+actieve servo achterblijft — in tegenstelling tot de autonome
+`DEPLOYED → LANDED`-transitie in vlucht, waar we net *niet* stowen
+omdat de cansat dan op de grond ligt.
 
 Volledige beschrijving van het radio-interface naar de servo's:
 [servo_tuning.md](servo_tuning.md).

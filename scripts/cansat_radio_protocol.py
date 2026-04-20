@@ -683,6 +683,8 @@ def main() -> int:
 		try:
 			if action == ServoAction.PARK:
 				servo.park_all()
+			elif action == ServoAction.HOME:
+				servo.home_all()
 			elif action == ServoAction.ENABLE:
 				servo.enable_rail()
 			elif action == ServoAction.DISABLE:

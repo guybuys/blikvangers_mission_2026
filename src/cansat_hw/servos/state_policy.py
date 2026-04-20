@@ -18,11 +18,12 @@ In **DEPLOYED** wordt de gimbal actief — daar moet de rail aan staan zodat de
 control-loop pulsewidths kan zetten.
 
 Conventie: alle transities die een **veranderde** ``(mode, flight_state)``
-betekenen kiezen één van vier acties:
+betekenen kiezen één van vijf acties:
 
 * :data:`ServoAction.NONE`     — niets doen (rail blijft staan zoals hij stond).
-* :data:`ServoAction.ENABLE`   — rail aanzetten (gimbal komt actief).
-* :data:`ServoAction.DISABLE`  — alleen rail uit (geen stow-sequence).
+* :data:`ServoAction.ENABLE`   — rail aanzetten (gimbal komt actief, geen move).
+* :data:`ServoAction.HOME`     — rail aan + beide servo's naar ``center_us``.
+* :data:`ServoAction.DISABLE`  — alleen rail uit (geen stow-sequence, geen beweging).
 * :data:`ServoAction.PARK`     — ENABLE → STOW BOTH → wachten → DISABLE.
 """
 
@@ -45,6 +46,7 @@ class ServoAction(str, Enum):
 
 	NONE = "none"
 	ENABLE = "enable"
+	HOME = "home"
 	DISABLE = "disable"
 	PARK = "park"
 
@@ -78,33 +80,44 @@ def action_for_transition(
 	if prev_mode == "CONFIG" and new_mode == "MISSION":
 		return ServoAction.PARK
 
-	# CONFIG → TEST (DEPLOYED-dry-run). De gebruiker wil de gimbal kunnen zien
-	# bewegen tijdens TEST; rail aan zodat eventuele closed-loop kan testen.
+	# CONFIG → TEST (DEPLOYED-dry-run). Zelfde rail-policy als DEPLOYED: rail
+	# aan én servo's actief in ``center_us`` houden zodat de operator visueel
+	# kan valideren dat de gimbal reageert (i.p.v. slappe servo's die naar
+	# random posities driften zodra de rail open gaat).
 	if prev_mode == "CONFIG" and new_mode == "TEST":
-		return ServoAction.ENABLE
+		return ServoAction.HOME
 
-	# TEST → CONFIG (timer afgelopen of EVT MODE CONFIG END_TEST). Park: terug
-	# naar veilige stowed-positie en rail uit.
+	# TEST → CONFIG (timer afgelopen of EVT MODE CONFIG END_TEST). DISABLE:
+	# rail uit zónder beweging. Een PARK hier (zoals vroeger) stowt de gimbal
+	# na elke dry-run, wat ongewenst is als de operator de gimbal in home-
+	# positie wil houden voor inspectie en volgende tests. De operator kan
+	# altijd expliciet ``!servo park`` sturen als hij toch wil stowen.
 	if prev_mode == "TEST" and new_mode == "CONFIG":
-		return ServoAction.PARK
+		return ServoAction.DISABLE
 
 	# Binnen MISSION: per flight_state-overgang.
 	if prev_mode == "MISSION" and new_mode == "MISSION":
 		# PAD_IDLE → ASCENT: rail al uit na de eerdere PARK. Niets te doen.
 		if prev_state == STATE_PAD_IDLE and new_state == STATE_ASCENT:
 			return ServoAction.NONE
-		# ASCENT → DEPLOYED: parachute open, gimbal kan beginnen. Rail aan.
+		# ASCENT → DEPLOYED: parachute open, gimbal komt actief en wordt
+		# direct naar center_us gestuurd zodat de control-loop vanaf een
+		# bekende neutrale positie vertrekt.
 		if prev_state == STATE_ASCENT and new_state == STATE_DEPLOYED:
-			return ServoAction.ENABLE
-		# DEPLOYED → LANDED: einde vlucht. Park naar stow.
+			return ServoAction.HOME
+		# DEPLOYED → LANDED: impact op de grond gedetecteerd. NIET meer
+		# stowen — de gimbal kan in het gras/puin/kantelstand staan en een
+		# autonome beweging naar ``stow_us`` zou de servo's tegen een
+		# obstakel kunnen forceren. Enkel de rail uitzetten; de operator
+		# kan na recovery handmatig ``!servo park`` sturen.
 		if prev_state == STATE_DEPLOYED and new_state == STATE_LANDED:
-			return ServoAction.PARK
+			return ServoAction.DISABLE
 		# Andere intra-MISSION sprongen (zelden, bv. SET STATE handmatig).
-		# Als we naar LANDED gaan altijd PARK; naar DEPLOYED altijd ENABLE.
+		# Zelfde policy als boven: LANDED → enkel rail uit, DEPLOYED → HOME.
 		if new_state == STATE_LANDED:
-			return ServoAction.PARK
+			return ServoAction.DISABLE
 		if new_state == STATE_DEPLOYED:
-			return ServoAction.ENABLE
+			return ServoAction.HOME
 		return ServoAction.NONE
 
 	# MISSION → CONFIG: operator forceerde abort. Niets autonoom doen — laat de

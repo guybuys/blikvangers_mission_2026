@@ -27,17 +27,21 @@ class StatePolicyTest(unittest.TestCase):
 		)
 		self.assertEqual(out, ServoAction.PARK)
 
-	def test_config_to_test_enables(self) -> None:
+	def test_config_to_test_homes(self) -> None:
+		# TEST = DEPLOYED-dry-run: zelfde policy als ASCENT→DEPLOYED, dus HOME
+		# (rail aan + center_us) i.p.v. een "slap" ENABLE zonder pulse.
 		out = action_for_transition(
 			("CONFIG", STATE_NONE), ("TEST", STATE_DEPLOYED)
 		)
-		self.assertEqual(out, ServoAction.ENABLE)
+		self.assertEqual(out, ServoAction.HOME)
 
-	def test_test_to_config_parks(self) -> None:
+	def test_test_to_config_disables_without_park(self) -> None:
+		# Na TEST willen we de gimbal in home-positie houden voor inspectie;
+		# geen stow-beweging meer. Alleen rail uit.
 		out = action_for_transition(
 			("TEST", STATE_DEPLOYED), ("CONFIG", STATE_NONE)
 		)
-		self.assertEqual(out, ServoAction.PARK)
+		self.assertEqual(out, ServoAction.DISABLE)
 
 	def test_pad_idle_to_ascent_does_nothing(self) -> None:
 		out = action_for_transition(
@@ -45,17 +49,23 @@ class StatePolicyTest(unittest.TestCase):
 		)
 		self.assertEqual(out, ServoAction.NONE)
 
-	def test_ascent_to_deployed_enables(self) -> None:
+	def test_ascent_to_deployed_homes(self) -> None:
+		# Parachute open → gimbal actief naar center_us (HOME), niet enkel
+		# rail aan zonder pulse. Zo vertrekt de control-loop vanaf een
+		# bekende neutrale positie.
 		out = action_for_transition(
 			("MISSION", STATE_ASCENT), ("MISSION", STATE_DEPLOYED)
 		)
-		self.assertEqual(out, ServoAction.ENABLE)
+		self.assertEqual(out, ServoAction.HOME)
 
-	def test_deployed_to_landed_parks(self) -> None:
+	def test_deployed_to_landed_disables_without_move(self) -> None:
+		# Na impact op de grond: NIET meer stowen (gimbal kan in gras/puin
+		# staan). Enkel rail uit; operator kan ``!servo park`` sturen na
+		# recovery.
 		out = action_for_transition(
 			("MISSION", STATE_DEPLOYED), ("MISSION", STATE_LANDED)
 		)
-		self.assertEqual(out, ServoAction.PARK)
+		self.assertEqual(out, ServoAction.DISABLE)
 
 	def test_mission_to_config_no_autonomous_change(self) -> None:
 		# Operator forceerde abort; rail-policy doet niets autonoom.
@@ -64,18 +74,18 @@ class StatePolicyTest(unittest.TestCase):
 		)
 		self.assertEqual(out, ServoAction.NONE)
 
-	def test_manual_jump_to_landed_parks(self) -> None:
+	def test_manual_jump_to_landed_disables(self) -> None:
 		# SET STATE LANDED vanuit PAD_IDLE — niet realistisch maar moet veilig.
 		out = action_for_transition(
 			("MISSION", STATE_PAD_IDLE), ("MISSION", STATE_LANDED)
 		)
-		self.assertEqual(out, ServoAction.PARK)
+		self.assertEqual(out, ServoAction.DISABLE)
 
-	def test_manual_jump_to_deployed_enables(self) -> None:
+	def test_manual_jump_to_deployed_homes(self) -> None:
 		out = action_for_transition(
 			("MISSION", STATE_PAD_IDLE), ("MISSION", STATE_DEPLOYED)
 		)
-		self.assertEqual(out, ServoAction.ENABLE)
+		self.assertEqual(out, ServoAction.HOME)
 
 	def test_shutdown_with_rail_on_parks(self) -> None:
 		self.assertEqual(action_for_shutdown(True), ServoAction.PARK)
