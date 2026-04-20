@@ -16,9 +16,16 @@ from .detector import CameraUnavailable
 
 def make_picamera2_capture_fn(
 	*,
-	resolution: Tuple[int, int] = (4056, 3040),
+	resolution: Tuple[int, int] = (1600, 1300),
 ) -> Tuple[Any, Any]:
 	"""Bouw een (picamera2-instance, capture_fn) voor de CameraThread.
+
+	Default resolutie is **1600×1300** — het native actieve array van de
+	OV2311-sensor in de Arducam B0381 PiVariety NoIR (zie
+	``config/camera/tag_registry.json::sensor``). Voor een Pi HQ-camera
+	(IMX477, 4056×3040) moet de caller ``resolution=(4056, 3040)``
+	meegeven; libcamera clipt/schaalt de stream anders stil naar de
+	actieve sensor-array.
 
 	De caller is verantwoordelijk voor het sluiten van de picamera2-instance
 	(``picam2.stop()``). ``capture_fn`` is een callable met signatuur

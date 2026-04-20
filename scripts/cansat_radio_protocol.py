@@ -273,8 +273,9 @@ def main() -> int:
 		default=1014,
 		metavar="PX",
 		help="Breedte waarnaar de capture gedownscaled wordt voor AprilTag-detectie. "
-		"Full-res (4056) detecteert grotere afstanden maar is traag (~1 Hz); 1014 = "
-		"4× downscale geeft ~7 Hz met ~2× minder range. Default 1014.",
+		"Op de OV2311 native 1600 px is 1014 ≈ 1.6× downscale (~2-3× speedup); "
+		"800 geeft ~4× speedup maar verkleint de detect-range voor kleine tags. "
+		"Default 1014.",
 	)
 	p.add_argument(
 		"--camera-fps",
@@ -286,8 +287,10 @@ def main() -> int:
 	p.add_argument(
 		"--camera-resolution",
 		type=str,
-		default="4056x3040",
-		help="Capture-resolutie (WxH). Default 4056x3040 (full-res IMX477).",
+		default="1600x1300",
+		help="Capture-resolutie (WxH). Default 1600x1300 = native OV2311-array (Arducam "
+		"B0381 PiVariety). Zet naar 4056x3040 voor een IMX477/HQ-camera; een mismatch "
+		"geeft warnings van libcamera en een gecropt/geschaald beeld.",
 	)
 	p.add_argument(
 		"--camera-tag-families",

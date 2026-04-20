@@ -46,9 +46,10 @@ from .registry import TagRegistry
 DEFAULT_TARGET_FPS = 7.0
 
 # Default detectie-breedte (pixels). De full-res frames worden voor de
-# detector downscaled naar deze breedte; dat versnelt detectie ~16×
-# t.o.v. 4056 px, zonder dat kleine tags volledig verdwijnen (we houden
-# nog steeds meer dan genoeg pixels voor tag36h11 op onze missie-afmeten).
+# detector downscaled naar deze breedte; dat versnelt detectie ~2-3× op
+# de OV2311 (native 1600 px) zonder dat kleine tags volledig verdwijnen.
+# Voor een IMX477 (4056 px) zou 1014 zelfs ~16× speedup geven; we houden
+# hier één default die op beide sensors werkt.
 DEFAULT_DETECT_WIDTH = 1014
 
 

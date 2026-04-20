@@ -220,7 +220,7 @@ Nieuwe CLI-args voor
 |---|---|---|
 | `--no-camera` | uit | Schakel de camera-thread uit (radio-only test). |
 | `--tag-registry PAD` | `config/camera/tag_registry.json` | Pad naar JSON registry. |
-| `--camera-resolution WxH` | `4056x3040` | Picamera2 capture-resolutie. Override naar `1600x1300` voor de OV2311 (default is een legacy IMX477-waarde — mismatch geeft Picamera2-warnings maar geen fout, omdat libcamera de stream toch op de actieve sensor-array clipt). |
+| `--camera-resolution WxH` | `1600x1300` | Picamera2 capture-resolutie. Default = native actieve array van de OV2311 (Arducam B0381 PiVariety NoIR). Zet naar `4056x3040` als je een Pi HQ-camera met IMX477 monteert; libcamera clipt/schaalt bij een mismatch stil naar de actieve sensor. |
 | `--camera-detect-width PX` | `1014` | Downscale-breedte voor detectie. |
 | `--camera-fps HZ` | `7.0` | Bovengrens voor capture-frequentie. |
 | `--camera-tag-families F` | `tag36h11` | AprilTag-familie. |
