@@ -35,7 +35,11 @@ if _SRC.is_dir() and str(_SRC) not in sys.path:
 if str(_SCRIPT_DIR) not in sys.path:
 	sys.path.insert(0, str(_SCRIPT_DIR))
 
-from tag_metrics import compute_calibration_k, compute_metrics_from_corners
+from tag_metrics import (
+	compute_calibration_k,
+	compute_metrics_from_corners,
+	compute_metrics_pinhole,
+)
 
 
 def _parse_bracket_us(s: str) -> List[int]:
@@ -147,13 +151,37 @@ def main() -> int:
 	p.add_argument("--bno055-addr", type=lambda x: int(x, 0), default=0x28)
 	p.add_argument("--fusion", choices=("imu", "ndof"), default="imu")
 	p.add_argument(
+		"--tag-registry",
+		type=Path,
+		default=None,
+		help=(
+			"Pad naar config/camera/tag_registry.json. Indien gezet: "
+			"pinhole-modus met per-tag size_mm uit de registry "
+			"(zelfde formule als de Zero-radio-pijplijn). Anders: "
+			"legacy single-size calibratie via --calibration-data."
+		),
+	)
+	p.add_argument(
 		"--calibration-data",
 		type=str,
 		default="195.0:0.80,118.9:1.30,85.5:1.80,78.4:2.00,40.1:3.80,34.0:4.50",
-		help="tag_pixel_breedte:afstand_m,... voor k in tag_metrics",
+		help=(
+			"Legacy modus: tag_pixel_breedte:afstand_m,... voor k in "
+			"tag_metrics. Genegeerd als --tag-registry is gezet."
+		),
 	)
-	p.add_argument("--fx", type=float, default=1000.0)
-	p.add_argument("--fy", type=float, default=1000.0)
+	p.add_argument(
+		"--fx",
+		type=float,
+		default=1000.0,
+		help="Horizontale focal length voor offset-math (legacy modus). In registry-modus default = focal_length_px.",
+	)
+	p.add_argument(
+		"--fy",
+		type=float,
+		default=1000.0,
+		help="Verticale focal length voor offset-math (legacy modus). In registry-modus default = focal_length_px.",
+	)
 	p.add_argument("--no-sensors", action="store_true")
 	p.add_argument("--no-apriltag", action="store_true")
 	args = p.parse_args()
@@ -161,10 +189,41 @@ def main() -> int:
 	ws, hs = args.size.lower().split("x", 1)
 	size = (int(ws), int(hs))
 	bracket_us = _parse_bracket_us(args.bracket_us)
-	calib_pairs = _parse_calibration(args.calibration_data)
-	if not calib_pairs:
-		calib_pairs = [(78.4, 2.00)]
-	k = compute_calibration_k(calib_pairs)
+
+	registry = None
+	focal_px = 0.0
+	if args.tag_registry is not None:
+		try:
+			from cansat_hw.camera.registry import load_tag_registry
+
+			registry = load_tag_registry(args.tag_registry)
+			focal_px = float(registry.focal_length_px)
+			if focal_px <= 0:
+				print(
+					f"WARN: tag-registry {args.tag_registry} levert focal_length_px=0 — val terug op legacy --calibration-data",
+					file=sys.stderr,
+				)
+				registry = None
+		except Exception as e:
+			print(
+				f"WARN: kan tag-registry {args.tag_registry} niet laden ({e}) — val terug op legacy --calibration-data",
+				file=sys.stderr,
+			)
+			registry = None
+
+	if registry is not None:
+		print(
+			f"Pinhole-modus: registry={args.tag_registry}, focal_length_px={focal_px:.1f}, "
+			f"sensor_full_res={registry.full_res_px}, default_size_mm={registry.default_size_mm}",
+			file=sys.stderr,
+		)
+		k = 0.0
+	else:
+		calib_pairs = _parse_calibration(args.calibration_data)
+		if not calib_pairs:
+			calib_pairs = [(78.4, 2.00)]
+		k = compute_calibration_k(calib_pairs)
+		print(f"Legacy single-size modus: k={k:.2f} (uit {len(calib_pairs)} datapunten)", file=sys.stderr)
 
 	args.photo_dir.mkdir(parents=True, exist_ok=True)
 	args.log.parent.mkdir(parents=True, exist_ok=True)
@@ -329,15 +388,26 @@ def main() -> int:
 							if tid is None or not isinstance(cpx, list) or len(cpx) != 4 or iw <= 0 or ih <= 0:
 								continue
 							try:
-								m = compute_metrics_from_corners(
-									tag_id=int(tid),
-									corners_px=cpx,
-									image_w=iw,
-									image_h=ih,
-									k=k,
-									fx=args.fx,
-									fy=args.fy,
-								)
+								if registry is not None:
+									size_m = registry.size_mm_for(int(tid)) / 1000.0
+									m = compute_metrics_pinhole(
+										tag_id=int(tid),
+										corners_px=cpx,
+										image_w=iw,
+										image_h=ih,
+										focal_length_px=focal_px,
+										tag_size_m=size_m,
+									)
+								else:
+									m = compute_metrics_from_corners(
+										tag_id=int(tid),
+										corners_px=cpx,
+										image_w=iw,
+										image_h=ih,
+										k=k,
+										fx=args.fx,
+										fy=args.fy,
+									)
 								detections.append(m)
 							except Exception:
 								continue
