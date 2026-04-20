@@ -1,0 +1,21 @@
+{
+	"_comment": "AprilTag registry voor Fase 9. Per-ID fysieke afmeting (mm) + lens/sensor-parameters. Afstand-formule: dz_m = focal_length_px * size_m / max_side_px (full-res pixels).",
+	"lens": {
+		"focal_length_mm": 25.0,
+		"_comment_focal": "Telelens voor CanSat 2026. 25 mm brandpuntafstand."
+	},
+	"sensor": {
+		"name": "IMX477 (Raspberry Pi HQ camera)",
+		"pixel_pitch_um": 1.55,
+		"full_res_px": [4056, 3040]
+	},
+	"tags": {
+		"26": { "size_mm": 4500, "label": "Grote missie-tag (4.5 m)" },
+		"1":  { "size_mm": 1500, "label": "Kleine missie-tag #1 (1.5 m)" },
+		"2":  { "size_mm": 1500, "label": "Kleine missie-tag #2 (1.5 m)" },
+		"3":  { "size_mm": 1500, "label": "Kleine missie-tag #3 (1.5 m)" },
+		"4":  { "size_mm": 1500, "label": "Kleine missie-tag #4 (1.5 m)" }
+	},
+	"default_size_mm": 175,
+	"_comment_default": "Alle niet-geregistreerde IDs krijgen deze maat (17.5 cm papierprints)."
+}

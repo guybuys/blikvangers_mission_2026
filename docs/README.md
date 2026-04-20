@@ -21,6 +21,7 @@ Uitgebreidere notities en hardware-informatie. De **projectintro en installatie*
 - **BME280 / BNO055 (I²C):** `python scripts/bme280_test.py` / `python scripts/bno055_test.py` (`pip install smbus2` of `pip install -e ".[sensors]"`). Over de radio in CONFIG: `BME280` / `BNO055` (zie base station README).
 - **Gimbal (pigpio + calibratie-JSON):** [`scripts/gimbal/`](../scripts/gimbal/README.md) — calibratie in `config/gimbal/`; niveauregeling o.a. `scripts/gimbal_level.py` (BNO055 via smbus2).
 - **Camera (Picamera2 + AprilTag + logging):** [`scripts/camera/`](../scripts/camera/README.md) — `descent_telemetry.py`, `focus_preview.py`; demo-referentie in `zero_files/camera_project/`.
+- **[Camera + AprilTag-pijplijn in de radio-service (Fase 9)](camera.md)** — `TagBuffer`, `CameraThread`, afstandsformule `d = f_px × size_m / max_side_px`, `config/camera/tag_registry.json`, CLI-flags (`--no-camera`, `--tag-registry`, `--camera-detect-width`, `--camera-fps`, `--camera-resolution`, `--camera-tag-families`) en troubleshooting.
 
 ## Missie & vluchtstates (concept)
 

@@ -2,6 +2,14 @@
 
 [← Documentatie-index](README.md) · [← Project README](../README.md)
 
+> **Afkortingen** (eerste gebruik; volledige lijst in [glossary.md](glossary.md)):
+> **CanSat** = flight-software op de Raspberry Pi Zero 2 W.
+> **Pico** = base station (Raspberry Pi Pico, Thonny).
+> **SSH** = remote login over het netwerk (Secure Shell).
+> **systemd** = Linux-service-manager die services start bij boot en
+> bewaakt.
+> **RFM69** = LoRa-achtige radiotransceiver-module op SPI.
+
 De **Zero 2 W** draait `scripts/cansat_radio_protocol.py` als **systemd-service** zodat er **geen SSH** nodig is om het te starten. Unit-bestand: [`deploy/systemd/cansat-radio-protocol.service`](../deploy/systemd/cansat-radio-protocol.service).
 
 Draait als **`User=root`** zodat het draad-commando `SET TIME <unix_epoch>` de systeemklok kan zetten (`clock_settime`). Stop-gedrag: **`STOP RADIO`** (via de Pico) of **`Ctrl+C`** in een interactieve run exit-en met code **0** → systemd herstart **niet** (we gebruiken bewust `Restart=on-failure`). Pas na `sudo systemctl start …` of een **reboot** (service is `enabled`) komt hij weer op.

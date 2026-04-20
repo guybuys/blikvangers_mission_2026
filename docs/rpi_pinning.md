@@ -2,6 +2,19 @@
 
 [← Documentatie-index](README.md) · [← Project README](../README.md)
 
+> **Afkortingen** (eerste gebruik; volledige lijst in
+> [glossary.md](glossary.md)):
+> **BCM** = Broadcom-pinnummering voor GPIO (bv. `GPIO2`); niet gelijk
+> aan het fysieke headernummer (BOARD).
+> **BOARD** = fysieke pinpositie 1–40 op de 40-pins header.
+> **GPIO** = General-Purpose I/O — digitale pin die als input of output
+> geconfigureerd kan worden.
+> **I2C** = Inter-Integrated Circuit, 2-draads bus (SDA + SCL) voor
+> sensoren.
+> **SPI** = Serial Peripheral Interface, 4-draads hoge-snelheidsbus
+> (MOSI/MISO/SCLK/CS) voor bv. de RFM69.
+> **UART** = seriële poort (TX/RX); op de Pi hier niet actief gebruikt.
+
 Dit document beschrijft hoe de **fysieke header-pinnen** (1–40 op de connector) zich verhouden tot **BCM/GPIO-nummers** (zoals in de meeste libraries en `config.txt`), en welke verbindingen voor dit project bedoeld zijn.
 
 ## Fysiek beschikbare pinnen op de carrier

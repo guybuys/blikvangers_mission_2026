@@ -2,6 +2,23 @@
 
 Dit document beschrijft **hoe we de vlucht in fases denken**: eerst opstellen en configureren, daarna energiezuinig wachten op de lancering, dan meten tot na de deploy, en tenslotte terugvinden na de landing. De namen zijn **Engels** (conventie in code en internationale wedstrijden zoals CanSat); hieronder staat steeds **wat het Nederlands betekent** en **waarom** we het zo doen.
 
+> **Afkortingen** (eerste gebruik; volledige lijst in [glossary.md](glossary.md)):
+> **CanSat** = flight-software op de Raspberry Pi Zero 2 W (de "Zero").
+> **Pico** = base station (Raspberry Pi Pico, Thonny).
+> **BME280** = luchtdruk-/temperatuursensor.
+> **BNO055** = 9-DoF oriëntatie-/acceleratie-sensor (**IMU**).
+> **TLM** = "telemetry"-frame: 60 B binair packet met mode, state,
+> dt\_ms, alt, druk, temp, IMU-samples, peak-g, freefall-duur,
+> trig-waarden — één per "tick".
+> **EVT** = ongevraagd "event"-bericht (state-wissel, mode-wissel,
+> servo-watchdog), gestuurd door de CanSat.
+> **IIR** = Infinite-Impulse-Response filter op de BME280-chip die
+> hoogte-ruis dempt.
+> **OSP / OSR** = oversampling (datasheet-term) — meer samples = minder
+> ruis per read, trager antwoord.
+> **ISA** = International Standard Atmosphere — drukmodel voor de
+> hoogte-omzetting.
+
 ---
 
 ## Waarom twee “lagen” van states?
@@ -160,7 +177,108 @@ Daarom wisselt de Zero de filter-coëfficient automatisch mee met de mode:
 - `SET IIR` wordt geweigerd buiten `CONFIG` (`ERR BUSY` / `ERR BUSY TEST|MISSION`) zodat de missie nooit ongemerkt een trage filter krijgt tijdens een kritieke fase.
 - `GET IIR` mag altijd en toont zowel de huidige chip-waarde als beide presets.
 
-#### `GET ALT` priming-burst
+### Continuous sensor-sampler (Fase 7)
+
+De main-loop van `cansat_radio_protocol.py` roept bij **elke iteratie**
+een gedeelde [`SensorSampler`](../src/cansat_hw/sensors/sampler.py).tick()
+aan. Dat is **één BME280-read + één BNO055-read** per tick, met
+rolling-window statistieken:
+
+| Afgeleid veld | Definitie | Gebruikt in |
+|---|---|---|
+| `peak_accel_g` | Max `‖a_lin‖` in het laatste ~500 ms window | `ACC`, `SHOCK`, `IMPACT` triggers |
+| `freefall_for_s` | Aaneensluitende secondes met `‖a_lin‖ ≤ 0,3 g` | `FREEFALL` trigger |
+| `alt_stable_for_s` | Aaneensluitende secondes met hoogte binnen σ-band | `STABLE` trigger |
+| `alt_m` | Laatste BME280-hoogte (mode-aware IIR) | Alle altitude-triggers |
+
+**Tick-cadans** hangt af van de main-loop receive-timeout:
+
+| Mode | Tick-cadans | Waarom |
+|---|---|---|
+| `CONFIG` | ≈1 Hz (`--poll`, default 1.0 s) | Spaar CPU; operator-commando's dicteren het tempo. |
+| `MISSION` / `TEST` | ≈5 Hz (rx\_timeout 0.2 s) | Snelle IMU-respons tijdens motor-burn / parachute-snap / impact. |
+
+Deze 5 Hz-tick is óók de motor achter de **autonome state-advance**
+(zie hieronder).
+
+### TLM-cadans (binary frames)
+
+`build_telemetry_packet()` bouwt een 60 B binair frame; de main-loop
+pusht het **ongevraagd** naar het base station zodra `MISSION` of
+`TEST` actief is.
+
+| Mode | TLM-push-interval | Configureerbaar? |
+|---|---|---|
+| `CONFIG` | **geen** autonome TLM — alleen op-verzoek via `GET ALT`, `READ BME280`, `READ BNO055` enz. | n.v.t. |
+| `MISSION` | **1.0 s** (default, instelbaar via `--mission-tlm-interval ≥ 0.1`) | ja, op start van de Zero-service |
+| `TEST` | **1.0 s** (vast) | nee — bewust niet, dry-run moet reproduceerbaar zijn |
+
+> De TLM-push-cadans (1 Hz) is **losgekoppeld** van de sensor-tick
+> (5 Hz). Je ziet per seconde één frame op de radio, maar de
+> state-machine evalueert intern 5× zo vaak — dus korte IMU-pieken
+> tussen twee TLM-pushes worden niet gemist.
+
+### Autonome state-advance
+
+`PAD_IDLE → ASCENT → DEPLOYED → LANDED` gebeurt **zonder** Pico-commando.
+Bij elke sampler-tick (dus ≈5 Hz in MISSION) roept de main-loop:
+
+```text
+sampler.tick()
+maybe_advance_flight_state(state, sampler.snapshot)
+_emit_evt_state_if_changed()
+_apply_servo_policy()
+```
+
+Gevolgen op het base station:
+
+- `EVT STATE <NAME> <REASON>` verschijnt ongevraagd bij elke transitie
+  (bv. `EVT STATE ASCENT ACC`). Zie
+  [mission_triggers.md §Reason-codes](mission_triggers.md#reason-codes-in-detail)
+  voor alle mogelijke waarden.
+- Binnen het binary TLM-frame staan `mode` en `flight_state` altijd mee,
+  dus ook zonder EVT reconstrueer je elke transitie uit de logs.
+- `GET STATE` → `OK STATE <NAME> [<REASON>]` geeft de huidige state +
+  de reden van de laatste transitie (leeg bij boot of na een
+  handmatige `SET STATE …`).
+- De Pico-CLI parseert `OK STATE …` en `EVT STATE …` automatisch en
+  werkt z'n lokale prompt-label bij. In `!log`-JSONL verschijnen ze als
+  `{"kind": "STATE", "state": "ASCENT", "reason": "ACC"}`.
+
+**Mission-overgangs-side-effects** (voor de volledigheid):
+
+- `SET MODE MISSION` → apogee wordt **automatisch gereset** (je hoeft
+  geen `!resetapogee` meer vooraf te doen). Preflight moet eerst OK zijn.
+- `SET MODE TEST` → flight\_state springt direct naar `DEPLOYED` (vast),
+  sampler-tick en TLM lopen op 1 Hz, geen echte triggers.
+- `SET MODE CONFIG` of `EVT MODE CONFIG END_TEST` → flight\_state terug
+  naar `NONE`, rail autonoom uitgezet (zie rail-policy hieronder).
+
+### Servo-rail-policy per flight-state
+
+De [state-policy](../src/cansat_hw/servos/state_policy.py) helper mapt
+`(prev_mode, prev_state) → (new_mode, new_state)` op een
+`ServoAction`. De main-loop past de actie bij elke tick toe (zowel
+bij `(mode,state)`-wissels door preflight als bij autonome
+state-advance). Samengevat:
+
+| Flight-state | Servo-rail | Gedrag |
+|---|---|---|
+| `NONE` (CONFIG) | **uit tenzij operator** `SERVO ENABLE/HOME/...` geeft | Alleen handmatige controle; watchdog kapt tuning na 5 min. |
+| `PAD_IDLE` | **uit** | Raket staat op de pad; servo's mechanisch in stow vóór MISSION. |
+| `ASCENT` | **uit** | Motor-burn; gimbal niet actief. |
+| `DEPLOYED` | **aan** | Gimbal-loop (Fase 9) zal hier positie-aansturing overnemen. |
+| `LANDED` | **stow → uit** (via PARK-sequence) | Beveilig mechaniek, zet rail af voor zoek-fase. |
+| `DEPLOYED` (TEST) | **aan** | Dry-run pusht TLM, rail aan zodat je de gimbal in de lucht kunt testen. |
+
+Bij service-shutdown (SIGTERM van systemd) stuurt dezelfde helper
+`action_for_shutdown()` → `PARK` (stow + rail uit) zodat nooit een
+actieve servo achterblijft.
+
+Volledige beschrijving van het radio-interface naar de servo's:
+[servo_tuning.md](servo_tuning.md).
+
+### `GET ALT` priming-burst
 
 In forced mode advanceert het IIR-filter alleen wanneer er gesampled wordt. Tussen twee handmatige `!alt`'s gebeurt er niets, en met IIR×4 zou één losse `GET ALT` na lange stilte slechts ~25 % van een echte hoogteverandering zien. Daarom doet de Zero per `GET ALT` standaard **5 back-to-back reads** (~750 ms bij OSP×16) en rapporteert de laatste:
 

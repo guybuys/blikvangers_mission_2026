@@ -113,49 +113,72 @@ zodat het binnen 60 B past, gelijk aan de preflight `SVO`-code).
 |---|---|
 | Centrale woordenlijst + uitleg-bij-eerste-gebruik conventie | [`docs/glossary.md`](glossary.md) |
 
+### Fase 10 — Documentatie-update (consolidation) ✅
+
+| Onderdeel | Belangrijkste files |
+|---|---|
+| Mission-states doc: TLM-cadans (1 Hz TLM-push vs. 5 Hz sampler-tick in MISSION/TEST), continuous sensor-sampler, EVT/OK STATE parsing-uitleg, autonome state-advance buiten Pico-commando's, servo-rail-policy per flight-state | [`docs/mission_states.md`](mission_states.md) |
+| Mission-triggers doc: multi-trigger OR-logica (IMU-primair + alt-backup), defaults `6.0g / 1.0s / 8.0g / 12.0g / 8.0s`, alle reason-codes (`ACC`/`ALT`/`FREEFALL`/`SHOCK`/`DESCENT`/`IMPACT`/`STABLE`), nieuwe `SET TRIG <ST> <FIELD> <VAL>` + `GET TRIG ALL`, apogee-reset side-effect van `SET MODE MISSION` | [`docs/mission_triggers.md`](mission_triggers.md) |
+| Nieuw: Servo-tuning handleiding (Fase 12 walkthrough — letter-mapping, watchdog 5 min, park/home/stow, preflight `SVO`, troubleshooting) | [`docs/servo_tuning.md`](servo_tuning.md) |
+| Base station README: retry-logic (MAX_TX_ATTEMPTS=3, REPLY_TIMEOUT_S=8 s), `OK STATE … REASON` + `EVT STATE …` parsing, `!apogee` reset op `SET MODE MISSION`, `!servo`/`!park`/`!home` snelkaart, `GET TRIG ALL` en `GET STATE` wire-cmds | [`pico_files/Orginele cansat/RadioReceiver/README_basestation.md`](../pico_files/Orginele%20cansat/RadioReceiver/README_basestation.md) |
+| Glossary-conventie uitgerold: afkortingen bij eerste gebruik + link naar glossary in `mission_states`, `mission_triggers`, `servo_tuning`, `cansat_radio_service`, `secrets`, `rpi_pinning` | (idem + [`docs/cansat_radio_service.md`](cansat_radio_service.md), [`docs/secrets.md`](secrets.md), [`docs/rpi_pinning.md`](rpi_pinning.md)) |
+| Glossary-uitbreiding: sensor-sampler entry, TLM-cadans-disambiguatie (push vs. tick) | [`docs/glossary.md`](glossary.md) |
+
+**Wat er anders is dan de oorspronkelijke spec**:
+
+- `src/cansat_hw/radio/protocol.py` bestond niet meer — de docstring-
+  referentie is vervallen (de binary codec zit in
+  [`src/cansat_hw/telemetry/codec.py`](../src/cansat_hw/telemetry/codec.py)
+  en is al duidelijk aangehaald in de andere docs).
+- TLM-cadans blijkt 1 Hz TLM-push (configureerbaar via
+  `--mission-tlm-interval`) bovenop een interne 5 Hz sampler-tick —
+  niet "5 Hz TLM". Die nuance is nu correct gedocumenteerd (zie
+  [mission_states §Continuous sensor-sampler](mission_states.md#continuous-sensor-sampler-fase-7)).
+
+### Fase 9 — Camera + AprilTag in TLM-flow ✅
+
+| Onderdeel | Belangrijkste files |
+|---|---|
+| Tag-registry (JSON) met per-ID fysieke afmeting + lens/sensor-parameters (25 mm telelens, IMX477 1.55 µm pitch → `focal_length_px ≈ 16129`) | [`config/camera/tag_registry.json`](../config/camera/tag_registry.json), [`src/cansat_hw/camera/registry.py`](../src/cansat_hw/camera/registry.py) |
+| Thread-safe `TagBuffer` met top-2 by `max_side_px` + staleness-policy (2 s) | [`src/cansat_hw/camera/buffer.py`](../src/cansat_hw/camera/buffer.py) |
+| Pinhole-afstandsmath (`d = f_px × size_m / max_side_px`) + lateraal-offset via kleine-hoek-benadering, met clamping naar i16 cm voor het TLM-frame | [`src/cansat_hw/camera/detector.py`](../src/cansat_hw/camera/detector.py) |
+| `CameraThread` die alleen in `DEPLOYED` capture't; pauzeert op conditie-variabele in andere flight-states (spec: geen CPU/warmte in `PAD_IDLE`/`ASCENT`/`LANDED`) | [`src/cansat_hw/camera/thread.py`](../src/cansat_hw/camera/thread.py) |
+| Lazy Picamera2 + OpenCV fabrieksfuncties; zonder hardware blijft de radio-service gewoon draaien (zelfde patroon als BNO/BME) | [`src/cansat_hw/camera/hardware.py`](../src/cansat_hw/camera/hardware.py) |
+| Integratie in de main loop: `set_active(flight_state == DEPLOYED)` + `tags=buffer.snapshot()` door `build_telemetry_packet`, nieuwe CLI-flags (`--no-camera`, `--tag-registry`, `--camera-detect-width`, `--camera-fps`, `--camera-resolution`, `--camera-tag-families`) | [`scripts/cansat_radio_protocol.py`](../scripts/cansat_radio_protocol.py) |
+| Tests: registry-loader (defaults/corrupt/bundled), buffer (top-2/staleness/thread-safety), distance-math (pinhole/scale/clamping), thread-lifecycle (run_once/set_active/start-stop/error-handling) | [`tests/test_camera_registry.py`](../tests/test_camera_registry.py), [`tests/test_camera_buffer.py`](../tests/test_camera_buffer.py), [`tests/test_camera_detector.py`](../tests/test_camera_detector.py), [`tests/test_camera_thread.py`](../tests/test_camera_thread.py) |
+| Handleiding: afstandsformule, downscale-keuzes, troubleshooting | [`docs/camera.md`](camera.md) |
+
+**Wat er anders is dan de oorspronkelijke spec**:
+
+- **Thread gekozen (geen subprocess)**: geen IPC-overhead, geen tweede
+  runtime om te babysitten. Met 4 ARM-cores op de Zero 2 W blokkeert de
+  detectie-thread de radio-loop (SPI-bound) niet.
+- **Detectie op gedownscalede frames (default 1014 px breed)**: volle
+  resolutie (4056 px) is ~1 s/frame op een Zero 2 W. Corners worden na
+  detectie met `inv_scale` teruggeschaald naar full-res zodat de
+  afstand-math gebruik maakt van consistent `focal_length_px`. Regelbaar
+  via `--camera-detect-width`.
+- **Bekende limiet `dz_cm` (±327 m)**: het bestaande 60-byte TLM-formaat
+  gebruikt i16 cm voor de 3D-afstand. Voor een CanSat met apogee
+  500–1000 m betekent dat dat `dz` op grote hoogte "vast" zit op 32767 cm.
+  Voor nu leven we daarmee omdat de twee praktische use-cases (live-plot
+  tijdens descent onder 300 m én "tag in beeld"-indicator op grotere
+  hoogte) allebei werken. Upgrade-pad: decimeter-encoding of extra
+  `size_px`-veld zou later kunnen, vereist breaking change in de codec.
+- **`default_size_mm = 175`**: alle niet-geregistreerde IDs krijgen de
+  afmeting van de papier-test-prints. Zo krijg je tijdens ground-tests
+  zinvolle afstanden voor willekeurige printouts; de vier missie-IDs
+  (1–4 + 26) blijven correct omdat die expliciet in de registry staan.
+
 ---
 
 ## In voorbereiding
 
-### Fase 10 — Documentatie-update 🚧
-
-**Doel**: documentatie synchroniseren met wat de code sinds Fase 6–8b
-daadwerkelijk doet, en de glossary-conventie uitrollen.
-
-**Concrete acties**:
-
-- [ ] [`docs/mission_states.md`](mission_states.md) — TLM-cadans (1 Hz CONFIG, 5 Hz MISSION/TEST), continuous sensor-sampler, EVT-records, autonome state-advance buiten Pico-commando's.
-- [ ] [`docs/mission_triggers.md`](mission_triggers.md) — nieuwe defaults (6.0g / 1.0s / 8.0g / 12.0g / 8.0s), multi-trigger OR-logica, alle `reason`-codes.
-- [ ] [`pico_files/Orginele cansat/RadioReceiver/README_basestation.md`](../pico_files/Orginele%20cansat/RadioReceiver/README_basestation.md) — `OK STATE … REASON` parsing, `!apogee` reset op `SET MODE MISSION`, retry-logic, nieuwe timeouts.
-- [ ] Glossary-conventie uitrollen naar de overige docs (`mission_states.md`, `mission_triggers.md`, `cansat_radio_service.md`, `secrets.md`, `rpi_pinning.md`) — afkortingen bij eerste gebruik uitschrijven, linken naar [`glossary.md`](glossary.md).
-- [ ] `src/cansat_hw/radio/protocol.py` (docstring) — verwijzen naar binary codec.
-
-**Acceptatie**: een nieuwe lezer (leerling die het project nog niet kent) kan na lezen van `docs/README.md` + de drie kerndocumenten een mission opzetten zonder source code te lezen.
+_Geen actieve fase op dit moment._
 
 ---
 
 ## Backlog (gespecificeerd, nog niet gestart)
-
-### Fase 9 — Camera + AprilTag in TLM-flow 📋
-
-**Doel**: tijdens `DEPLOYED` de top-2 grootste AprilTags (id + relatieve
-positie + grootte) meesturen in elk TLM-frame.
-
-**Specificatie**:
-- Aparte process/thread op de Zero, ≈7 Hz Picamera2-loop.
-- AprilTag-detectie (`pupil_apriltags` of `apriltag`-binding).
-- Rolling buffer met de **2 grootste** tags (`size_mm` desc).
-- Sampler leest deze buffer; codec heeft al ruimte (`tags`-veld in `TelemetryFrame`).
-- **Geen** AprilTag-werk in `PAD_IDLE`/`ASCENT`/`LANDED` (CPU + warmte sparen).
-
-**Belangrijkste files**:
-[`src/cansat_hw/camera/`](../src/cansat_hw/camera/),
-[`src/cansat_hw/telemetry/codec.py`](../src/cansat_hw/telemetry/codec.py) (codec is klaar),
-[`scripts/cansat_radio_protocol.py`](../scripts/cansat_radio_protocol.py) (integratie).
-
-**Open vragen**:
-- Process of thread? Process geeft betere CPU-isolatie maar IPC-overhead.
-- Camera-resolutie vs detectie-snelheid (640×480 of 1280×720).
 
 ### Fase 12 — Servo-tuning + park/stow via radio (uitgewerkte spec, ✅ geïmplementeerd)
 
@@ -331,9 +354,11 @@ kan een uur zitten). Pas inplannen als de rest stabiel vliegt.
 
 ## Voorgestelde volgorde
 
-1. **Fase 10 (docs)** — kort, ruimt achterstand op, maakt het project navigeerbaar voor leerlingen.
-2. **Fase 9 (camera + AprilTag)** — hét grote ontbrekende stuk vóór een echte vlucht. Plan ruim.
-3. **Fase 5 (Pico-log)** of **Fase 11 (power)** afhankelijk van wat er bij echte testvluchten als pijnpunt naar boven komt.
+1. **Ground-test met echte camera + tags** — eerste keer op de Zero met
+   de telelens, volledige registry valideren, ``dz``-waarden meten op
+   bekende afstanden, optioneel `default_size_mm` tunen.
+2. **Fase 5 (Pico-log)** of **Fase 11 (power)** afhankelijk van wat er bij
+   echte testvluchten als pijnpunt naar boven komt.
 
 ---
 

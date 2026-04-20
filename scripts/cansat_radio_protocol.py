@@ -27,7 +27,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 os.environ.setdefault("GPIOZERO_PIN_FACTORY", "rpigpio")
 
@@ -255,6 +255,46 @@ def main() -> int:
 		action="store_true",
 		help="Servo-rail enable-pin is active-low (rail aan = pin laag).",
 	)
+	p.add_argument(
+		"--no-camera",
+		action="store_true",
+		help="Schakel de camera-thread uit (geen Picamera2/AprilTag, geen tags in TLM). "
+		"Handig voor radio-only test-runs zonder CSI-camera of OpenCV.",
+	)
+	p.add_argument(
+		"--tag-registry",
+		type=str,
+		default=str(_ROOT / "config" / "camera" / "tag_registry.json"),
+		help="Pad naar AprilTag-registry JSON (fysieke tag-afmetingen + lens/sensor-parameters).",
+	)
+	p.add_argument(
+		"--camera-detect-width",
+		type=int,
+		default=1014,
+		metavar="PX",
+		help="Breedte waarnaar de capture gedownscaled wordt voor AprilTag-detectie. "
+		"Full-res (4056) detecteert grotere afstanden maar is traag (~1 Hz); 1014 = "
+		"4× downscale geeft ~7 Hz met ~2× minder range. Default 1014.",
+	)
+	p.add_argument(
+		"--camera-fps",
+		type=float,
+		default=7.0,
+		metavar="HZ",
+		help="Frames-per-seconde bovengrens voor de camera-thread. Default 7 Hz.",
+	)
+	p.add_argument(
+		"--camera-resolution",
+		type=str,
+		default="4056x3040",
+		help="Capture-resolutie (WxH). Default 4056x3040 (full-res IMX477).",
+	)
+	p.add_argument(
+		"--camera-tag-families",
+		type=str,
+		default="tag36h11",
+		help="AprilTag-familie voor de detector. Default tag36h11 (zoals de missie-tags).",
+	)
 	args = p.parse_args()
 	if args.mission_tlm_interval < 0.1:
 		print("--mission-tlm-interval moet >= 0.1 s zijn", file=sys.stderr)
@@ -356,6 +396,7 @@ def main() -> int:
 		make_pigpio_driver,
 	)
 	from cansat_hw.telemetry import LogManager, state_name
+	from cansat_hw.telemetry.codec import STATE_DEPLOYED as _STATE_DEPLOYED
 
 	rfm = RFM69(
 		spi_bus=args.spi_bus,
@@ -438,6 +479,101 @@ def main() -> int:
 			"WARN: gimbal-cfg %s ontbreekt — servo-controller uit." % gimbal_cfg_path,
 			file=sys.stderr,
 		)
+
+	# Camera-thread (Fase 9). Start alleen als --no-camera NIET meegegeven is
+	# én picamera2 + apriltag + cv2 allemaal importeerbaar zijn. Registry
+	# wordt altijd geladen (ook als camera uit staat) zodat ``--tag-registry``-
+	# validatie transparant is; de buffer blijft dan gewoon leeg.
+	camera_thread = None
+	tag_buffer = None
+	picam2_handle: Any = None
+	tag_registry_obj = None
+	from cansat_hw.camera import (
+		CameraThread,
+		CameraUnavailable,
+		TagBuffer,
+		load_apriltag_detector,
+		load_tag_registry,
+	)
+
+	tag_registry_path = Path(args.tag_registry).expanduser()
+	tag_registry_obj = load_tag_registry(tag_registry_path)
+	if not tag_registry_path.is_file():
+		print(
+			"WARN: tag-registry %s ontbreekt — defaults actief (focal=%.1f mm, default_size=%d mm)"
+			% (
+				tag_registry_path,
+				tag_registry_obj.focal_length_mm,
+				tag_registry_obj.default_size_mm,
+			),
+			file=sys.stderr,
+		)
+
+	if not args.no_camera:
+		cam_w: Optional[int] = None
+		cam_h: Optional[int] = None
+		try:
+			cam_w_s, cam_h_s = args.camera_resolution.lower().split("x", 1)
+			cam_w = int(cam_w_s)
+			cam_h = int(cam_h_s)
+		except (ValueError, AttributeError):
+			print(
+				"WARN: --camera-resolution %r ongeldig (verwacht WxH, bv. 4056x3040); camera uit"
+				% args.camera_resolution,
+				file=sys.stderr,
+			)
+		if cam_w is not None and cam_h is not None:
+			try:
+				from cansat_hw.camera.hardware import (
+					make_opencv_preprocess_fn,
+					make_picamera2_capture_fn,
+				)
+
+				picam2_handle, capture_fn = make_picamera2_capture_fn(
+					resolution=(cam_w, cam_h)
+				)
+				preprocess_fn = make_opencv_preprocess_fn()
+				detector = load_apriltag_detector(
+					families=args.camera_tag_families,
+					quad_decimate=2.0,
+				)
+				tag_buffer = TagBuffer()
+				camera_thread = CameraThread(
+					buffer=tag_buffer,
+					registry=tag_registry_obj,
+					capture_fn=capture_fn,
+					preprocess_fn=preprocess_fn,
+					detector=detector,
+					target_fps=float(args.camera_fps),
+					detect_width=int(args.camera_detect_width),
+				)
+				camera_thread.start()
+				print(
+					"Camera-thread actief — %dx%d capture, %d px detect, %.1f fps cap, family=%s"
+					% (
+						cam_w,
+						cam_h,
+						int(args.camera_detect_width),
+						float(args.camera_fps),
+						args.camera_tag_families,
+					)
+				)
+			except CameraUnavailable as e:
+				print(
+					"WARN: camera-thread uit — %s" % e,
+					file=sys.stderr,
+				)
+				camera_thread = None
+				tag_buffer = None
+				picam2_handle = None
+			except Exception as e:  # noqa: BLE001
+				print(
+					"WARN: camera-thread init mislukte: %s — camera uit" % e,
+					file=sys.stderr,
+				)
+				camera_thread = None
+				tag_buffer = None
+				picam2_handle = None
 
 	def _emit_evt_state_if_changed() -> None:
 		"""Stuur ongevraagd ``EVT STATE <NAME> [<REASON>]`` als de state-
@@ -577,6 +713,13 @@ def main() -> int:
 			# zodat de gimbal autonoom geënabled/gepark wordt — onafhankelijk
 			# van de oorzaak (Pico-commando of state-machine).
 			_apply_servo_policy()
+			# Camera-policy: alleen tijdens DEPLOYED capturen + detecteren.
+			# In PAD_IDLE/ASCENT/LANDED pauzeert de thread (spec Fase 9:
+			# CPU + warmte sparen). De ``set_active`` helper is idempotent.
+			if camera_thread is not None:
+				camera_thread.set_active(
+					int(state.flight_state) == int(_STATE_DEPLOYED)
+				)
 			# Tuning-watchdog: kapt een vergeten SERVO START na 60 s zodat de
 			# rail niet onbedoeld aan blijft staan en LiPo leegloopt.
 			if servo is not None:
@@ -616,8 +759,15 @@ def main() -> int:
 				apply_mode_iir(state, bme280)
 			elif send_tlm:
 				dest = state.test_dest_node if state.test_dest_node is not None else args.dest
+				tags_for_tlm = (
+					tag_buffer.snapshot() if tag_buffer is not None else None
+				)
 				tlm = build_telemetry_packet(
-					state, bme280, bno055, snapshot=sampler.snapshot
+					state,
+					bme280,
+					bno055,
+					snapshot=sampler.snapshot,
+					tags=tags_for_tlm,
 				)
 				ok_tlm = rfm.send(tlm, keep_listening=True, destination=dest)
 				log_manager.write_payload(tlm)
@@ -756,6 +906,20 @@ def main() -> int:
 				bno055.close()
 			except Exception:
 				pass
+		# Camera-thread stoppen vóór servo/log — zo stopt de Picamera2-driver
+		# schoon (geen stale frames op het socket) en kunnen eventuele laatste
+		# log-writes nog mee.
+		if camera_thread is not None:
+			try:
+				camera_thread.stop()
+			except Exception as e:  # noqa: BLE001
+				print("WARN: camera-thread stop faalde:", e, file=sys.stderr)
+		if picam2_handle is not None:
+			try:
+				picam2_handle.stop()
+			except Exception:  # noqa: BLE001
+				pass
+
 		# Servo shutdown vóór log_manager.close() zodat een eventuele atexit-
 		# park-EVT nog gelogd kan worden. Bij rail-aan park'en we netjes naar
 		# stowed; bij actieve tuning kappen we de sessie zonder beweging.

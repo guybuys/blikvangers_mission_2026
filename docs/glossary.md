@@ -19,7 +19,10 @@ in deze repo. Andere documenten linken hier naartoe bij eerste gebruik.
 | **BME280** | Bosch omgevingssensor | Druk (hPa), temperatuur (°C), luchtvochtigheid (%RH). Via I²C. Levert hoogte via barometrische formule (zie ISA). |
 | **BNO055** | Bosch 9-DOF IMU | Versnelling, gyroscoop, magnetometer + sensor-fusion → Euler-hoeken (heading/roll/pitch). Via I²C. |
 | **IMU** | Inertial Measurement Unit | Verzamelterm voor accelerometer + gyroscoop (+ magnetometer). Bij ons = BNO055. |
-| **AprilTag** | Visueel fiducial-marker | Zwart/wit vierkant, vergelijkbaar met QR-code; door de camera op de Zero gedetecteerd voor doel-localisatie tijdens `DEPLOYED`. |
+| **AprilTag** | Visueel fiducial-marker | Zwart/wit vierkant, vergelijkbaar met QR-code; door de camera op de Zero gedetecteerd voor doel-localisatie tijdens `DEPLOYED`. Familie `tag36h11` voor de 2026-missie. Zie [`camera.md`](camera.md). |
+| **tag-registry** | `config/camera/tag_registry.json` | Per-ID fysieke afmeting (`size_mm`) + lens- en sensor-parameters (`focal_length_mm`, `pixel_pitch_um`). Input voor de afstandsberekening in de camera-pipeline. |
+| **`focal_length_px`** | Brandpuntafstand in pixels | Afgeleid uit `focal_length_mm × 1000 / pixel_pitch_um`. Voor 25 mm telelens + IMX477 (1.55 µm pitch) = ~16 129 px op volle resolutie. Gebruikt in de pinhole-afstand-formule `d = f_px × tag_size_m / max_side_px`. |
+| **`max_side_px`** | Langste zijde van de AprilTag-vierhoek in pixels | Uitgedrukt in full-res pixels (corners worden na detectie op downscaled frame teruggeschaald). Input voor de afstandsberekening. |
 | **Gimbal** | 2-as servo-platform | Houdt camera horizontaal tijdens descent, aangestuurd via `pigpio` op basis van BNO055-Euler. |
 | **stowed** | "Ingeklapte" servo-positie | Veilige mechanische rust-stand voor in-rocket en post-landing. Gekalibreerd per servo (`stow_us` in `config/gimbal/servo_calibration.json`). Gebruikt door `SERVO STOW` / `SERVO PARK` en autonoom bij `MISSION`-entry, `LANDED`, `END_TEST` en service-shutdown. |
 | **rail (servo-rail)** | Voedingslijn naar de servo's | Schakelbaar via BCM6 (`servo_rail_set`). "Rail aan" = stroom op servo's; "rail uit" = vrij draaibaar, geen verbruik. Policy: in `CONFIG` operator-controlled, in `MISSION`/`TEST` automatisch bepaald door flight-state. |
@@ -49,7 +52,8 @@ en [`src/cansat_hw/radio/wire_protocol.py`](../src/cansat_hw/radio/wire_protocol
 
 | Term | Betekenis | Toelichting |
 |---|---|---|
-| **TLM** | Telemetry record | 60-byte binary frame met sensormeetwaarden + tijdstempel + mode/state. Eén per "tick" (≈1 Hz in `MISSION`, ≈5 Hz in continue logging). |
+| **TLM** | Telemetry record | 60-byte binary frame met sensormeetwaarden + tijdstempel + mode/state. **TLM-push-cadans over de radio**: 1 Hz in `MISSION` (`--mission-tlm-interval`) én `TEST`. Intern draait de [sensor-sampler](#) ~5 Hz in `MISSION`/`TEST` zodat korte IMU-pieken tussen twee TLM-frames niet gemist worden voor de state-machine. Zie [mission_states.md](mission_states.md#tlm-cadans-binary-frames). |
+| **sensor-sampler** | `SensorSampler` in `cansat_hw.sensors.sampler` | Gedeelde pull-based sampler die per tick één BME280- + één BNO055-read doet en rolling-window afgeleiden bijhoudt: `peak_accel_g`, `freefall_for_s`, `alt_stable_for_s`. Input voor de [multi-trigger evaluatie](mission_triggers.md). |
 | **EVT** | Event record | Tekstuele gebeurtenis-melding zoals `EVT STATE LANDED IMPACT` of `EVT MODE CONFIG END_TEST`. Wordt **direct** verstuurd, niet op de TLM-cadans. |
 | **HDR / HEADER** | Header record | Eén keer per log-bestand vooraan: versie, mode, frame-grootte, hostname, UTC-starttijd. Type-byte `0xF0`. Gaat **niet** over de radio, alleen in `.bin`-files. |
 | **CRC** | Cyclic Redundancy Check | Checksum op elk record. `bad-CRC` in een decode-summary betekent een corrupt frame in het log-bestand (bv. SD-kaart-glitch, niet packetloss op de radio). |

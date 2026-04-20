@@ -49,7 +49,7 @@ Op de **CanSat (Zero 2 W)** draait `cansat_radio_protocol.py` **zonder** toetsen
 | `!freq 433.0` | RF-frequentie op **deze** Pico |
 | `!dest 120` | RadioHead-bestemming (CanSat-node op de Zero) |
 | `!node 100` | Eigen node (base station) |
-| `!timeout 4.0` | Seconden wachten op antwoord na zenden (default 4 s — hoog genoeg voor `CAL GROUND`/`PREFLIGHT` met IIR×16) |
+| `!timeout 8.0` | Totaal seconden wachten op antwoord na zenden (default **8 s** — verdeelt zich over `MAX_TX_ATTEMPTS=3` pogingen, ≥2.5 s per poging; hoog genoeg voor `CAL GROUND` / `PREFLIGHT` met IIR×16). Verhogen bij zwakke RF-link. |
 | `!gap 0.05` | Pauze na eigen TX vóór RX (half-duplex) |
 | `!info` | Huidige instellingen |
 | `!time` | Stuurt `SET TIME <epoch>` naar de CanSat (MicroPython `time.time()` — voor juiste tijd: Pico-klok syncen vanaf Thonny/laptop, zie hieronder) |
@@ -57,7 +57,19 @@ Op de **CanSat (Zero 2 W)** draait `cansat_radio_protocol.py` **zonder** toetsen
 | `!gettime` | Stuurt `GET TIME` naar de CanSat; de Zero antwoordt met `OK TIME <epoch> <ISO local>` (bv. `2026-04-17T23:55:36+02:00`) |
 | `!preflight` | Stuurt `PREFLIGHT` — toont missende categorieën of `OK PRE ALL …` met grond-/trigger-info |
 | `!calground` | Stuurt `CAL GROUND` — de Zero middelt BME280-druk en bewaart die als grondreferentie |
-| `!triggers` | Stuurt `GET TRIGGERS` — huidige drempels (ASCENT m [+ hPa-equiv], DEPLOY m-daling vanaf apogee, LAND m) |
+| `!triggers` | Stuurt `GET TRIGGERS` — compacte altitude-only weergave (ASCENT m [+ hPa-equiv], DEPLOY m-daling vanaf apogee, LAND m) |
+| `!state` | Stuurt `GET STATE` — huidige flight-state + reden van laatste overgang (bv. `OK STATE ASCENT ACC`, of `OK STATE PAD_IDLE` zonder reason bij boot). |
+| `!servo` / `!servo tune` | Opent een **sub-REPL** voor servo-calibratie (`SERVO START → letters → SAVE/STOP`). Volledige walkthrough: [servo_tuning.md](../../../docs/servo_tuning.md). |
+| `!servo enable` / `!servo disable` / `!servo status` | Shortcuts voor `SERVO ENABLE` / `DISABLE` / `STATUS`. |
+| `!servo home` / `!home` | Stuurt `SERVO HOME` — beide servo's naar `center_us`, rail blijft aan. |
+| `!servo park` / `!park` | Stuurt `SERVO PARK` — rail aan → `stow_us` → 800 ms wachten → rail uit. Veilige stow vóór transport / MISSION. |
+| `!servo stow` | Stuurt `SERVO STOW` — alleen naar `stow_us` (rail moet al aan staan). |
+
+> Voor de volledige multi-trigger view (nieuwe IMU+altitude-drempels)
+> typ je `GET TRIG ALL` rechtstreeks — er is geen `!trig…`-shortcut op
+> de Pico. Reply: `OK TRIG A=5.0m/6.0g D=3.0m/8.0g/1.0s L=5.0m/12.0g/8.0s`.
+> Zie [mission_triggers.md](../../../docs/mission_triggers.md) voor
+> defaults, ranges en tuning-tips.
 | `!alt` | Stuurt `GET ALT` — hoogte boven grondreferentie + actuele druk (werkt ook in MISSION) |
 | `!apogee` | Stuurt `GET APOGEE` — hoogste hoogte tot nu toe, bijhorende druk en ouderdom in s |
 | `!resetapogee` | Stuurt `RESET APOGEE` — apogee-tracking herbeginnen (alleen CONFIG) |
@@ -68,6 +80,53 @@ Op de **CanSat (Zero 2 W)** draait `cansat_radio_protocol.py` **zonder** toetsen
 | `!log on [pad]` | Start JSON-lines log op de Pico-flash (default `cansat_<timestamp>.jsonl`) |
 | `!log off` | Sluit de actieve log af |
 | `!log status` | Toont of er gelogd wordt + pad + laatst gekende MISSION-mode |
+
+### Retry-gedrag en timeouts
+
+De Pico stuurt elk commando **tot `MAX_TX_ATTEMPTS = 3` keer** opnieuw
+als er geen antwoord komt binnen een **per-poging-venster** van
+`max(2.5 s, REPLY_TIMEOUT_S / MAX_TX_ATTEMPTS)`:
+
+- Default `REPLY_TIMEOUT_S = 8.0 s` → 3 × ~2.67 s wachtvensters.
+- `!timeout 10` → ~3.33 s per poging, totaal ~10 s.
+- Tussen elke TX en de RX-switch zit `REPLY_GAP_S = 50 ms` (`!gap`).
+  Verhoog naar 100 ms bij randgevallen van half-duplex.
+
+Retries worden in de log gelogd als `TX`-records met
+`{"attempt": N, "of": 3}`; een echte gegeven-op is een `TIMEOUT`-record
+met `{"timeout_s": 8.0, "attempts": 3}`.
+
+Ongevraagde frames (`EVT STATE …`, `EVT MODE …`, `TLM …`, `EVT SERVO
+WATCHDOG`) mogen altijd binnenkomen; ze worden niet in de retry-telling
+meegenomen en de command-reply-matcher negeert ze, zodat ze je antwoord
+op bv. `PING` niet "stelen".
+
+### Flight-state op het base station
+
+Door `OK STATE …` en `EVT STATE …` mee te parsen weet de Pico altijd
+welke **flight-state** de CanSat rapporteert, en welke **reden** de
+laatste transitie triggerde:
+
+```text
+BS>
+RX <- EVT STATE ASCENT ACC         (≈ direct na lift-off)
+RX <- EVT STATE DEPLOYED FREEFALL  (parachute open / vrije val)
+RX <- EVT STATE LANDED IMPACT      (touchdown)
+```
+
+- Reason-codes: `ACC`, `ALT`, `FREEFALL`, `SHOCK`, `DESCENT`, `IMPACT`,
+  `STABLE` — zie [mission_triggers.md](../../../docs/mission_triggers.md#reason-codes-in-detail).
+- De Pico-CLI logt elke EVT in JSONL als
+  `{"kind": "EVT_STATE", "state": "ASCENT", "reason": "ACC"}`.
+- `!state` geeft op elk moment de huidige state + reason ad-hoc op
+  (`GET STATE`).
+
+**Belangrijke side-effect van `SET MODE MISSION`**: de Zero reset
+**automatisch** de apogee (`max_alt_m` → `None`) bij elke `CONFIG →
+MISSION`-overgang. Je hoeft dus **geen** `!resetapogee` meer te doen
+vóór de vlucht — de vorige MISSION of test-sessie kan geen stale apogee
+achterlaten. `!resetapogee` blijft nuttig als je tijdens CONFIG een
+`!alt`-test hebt gedaan en de teller wil opschonen.
 
 ### Log-formaat
 
@@ -96,6 +155,31 @@ alt = pd.json_normalize(mission["parsed"])
 ```
 
 **Let op Pico-flash:** een log-bestand van ~200 KB (≈ een uur vliegen met `!alt` elke seconde) past prima; elke write `flush()`t direct, zodat je bij een reset geen regels verliest. Schakel `!log off` aan het eind van een sessie zodat de file netjes wordt gesloten. Voor lange sessies: regelmatig nieuwe file (`!log off` + `!log on`) — blokken van ~1 MB blijven handelbaar.
+
+### Servo-tuning / park / home vanaf de Pico (snelkaart)
+
+Voor alle details zie [servo_tuning.md](../../../docs/servo_tuning.md).
+Korte versie:
+
+```text
+BS> !servo           # opent sub-REPL  (TX SERVO START 1)
+servo> a a a a       # fijne stappen (-10us elk)
+servo> A             # grove stap (-50us)
+servo> z             # markeer MIN op huidige us
+servo> D D D … x     # andere kant op; markeer MAX
+servo> N 1500 c      # naar 1500us; markeer CENTER
+servo> w             # markeer STOW (mag = CENTER bij testen zonder gimbal)
+servo> 2             # switch naar servo 2, herhaal
+servo> s             # SAVE naar servo_calibration.json
+servo> q             # STOP (rail uit)
+
+BS> !home            # rail aan + beide servo's naar center (actieve hold)
+BS> !park            # rail aan → stow → 0.8s → rail uit  (veilige transport)
+BS> !servo status    # snapshot zonder beweging (ook in MISSION toegelaten)
+```
+
+De sub-REPL heeft een **5 min watchdog**: na 5 min zonder commando stopt
+tuning automatisch (rail uit). `!servo status` reset de watchdog.
 
 ## Draad-protocol (naar CanSat over RFM69)
 
@@ -135,6 +219,16 @@ Voorbeelden:
   - Tijdens `TEST` pusht de Zero elke seconde ongevraagd één `TLM <dt_ms> <alt_m> <p_hpa> <T_c> <heading> <roll> <pitch> <sys_cal>`-regel naar het base station (ontbrekende sensoren → `NA`).
   - Alle commando's worden geweigerd met `ERR BUSY TEST` behalve `PING`, `GET MODE`, `GET TIME`. Ook `SET MODE CONFIG` en `STOP RADIO` zijn geblokkeerd — de timer is bewust niet te aborteren.
   - Na afloop stuurt de Zero éénmalig `EVT MODE CONFIG END_TEST` en herstelt intern naar `CONFIG`. Base station: gebruik `!test [seconds]` om dit in één beweging af te handelen.
+- **Flight-state & triggers (Fase 8/8b):**
+  - `GET STATE` → `OK STATE <NAME> [<REASON>]` (NAME = NONE / PAD\_IDLE / ASCENT / DEPLOYED / LANDED; REASON = `ACC` / `ALT` / `FREEFALL` / `SHOCK` / `DESCENT` / `IMPACT` / `STABLE` — zie [mission_triggers.md](../../../docs/mission_triggers.md)).
+  - `SET STATE <NAME>` — handmatig forceren; alleen in `CONFIG` (wordt in MISSION geweigerd met `ERR BUSY`).
+  - `SET TRIG <ST> <FIELD> <VAL>` — nieuwe multi-trigger setter: `ASC HEIGHT|ACC`, `DEP DESCENT|SHOCK|FREEFALL`, `LND ALT|IMPACT|STABLE`. Bv. `SET TRIG ASC ACC 5.0` → `OK TRIG ASC ACC 5.00g`. Alleen in CONFIG.
+  - `SET TRIGGER ASCENT|DEPLOY|LAND <m>` — legacy-alias voor de altitude-backup-velden (ASCENT HEIGHT, DEPLOY DESCENT, LAND ALT).
+  - `GET TRIG ALL` → `OK TRIG A=<m>/<g> D=<m>/<g>/<s> L=<m>/<g>/<s>` (volledig; past binnen 60 B).
+  - **Side-effect `SET MODE MISSION`:** apogee wordt atomair gereset (`max_alt_m` → `None`) zodat een vorige sessie `DESCENT` niet meteen kan fire-n.
+- **Servo-rail (Fase 12):**
+  - `SERVO STATUS` — altijd toegelaten (ook in MISSION/TEST). Reply: `OK SVO R=<on|off> T=<on|off> SEL=<1|2|-> US1=<us> US2=<us> CAL=<yes|no>`.
+  - `SERVO ENABLE` / `DISABLE` / `HOME` / `STOW` / `PARK` / `START [1|2]` / `SEL <1|2>` / `STEP <±us>` / `SET <us>` / `MIN` / `CENTER` / `MAX` / `STOW_MARK` / `SAVE` / `STOP` — alleen in CONFIG. Volledige beschrijving: [servo_tuning.md](../../../docs/servo_tuning.md). Tijdens een tuning-sessie loopt een **5 min watchdog**; bij timeout pusht de Zero `EVT SERVO WATCHDOG` en zet rail uit.
 - `STOP RADIO` — beëindigt `cansat_radio_protocol.py` **na** het antwoord `OK STOP RADIO` (werkt in CONFIG en MISSION, **niet** in TEST). Handig bij autostart via **systemd**; alternatief: `sudo systemctl stop …` of SSH/`kill`.
 
 Vrije tekst zonder prefix wordt ook verstuurd (handig om te debuggen).

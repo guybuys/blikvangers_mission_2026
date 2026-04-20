@@ -1,79 +1,210 @@
 # Mission triggers — drempelwaarden voor `PAD_IDLE → ASCENT → DEPLOYED → LANDED`
 
-Dit document legt uit **welke gebeurtenissen** de Zero tijdens `MISSION` probeert te detecteren, **welke sensor-drempel** daar in de code bij hoort, hoe je die **instelt vanaf het base station**, en wat zinvolle **defaults** zijn.
+Dit document legt uit **welke gebeurtenissen** de CanSat tijdens
+`MISSION` probeert te detecteren, **welke sensoren** daarvoor gecombineerd
+worden, hoe je elke drempel **instelt vanaf het base station**, en wat
+zinvolle **defaults** zijn.
 
-> **Belangrijk:** de wire-commando's om de triggers te **configureren** (en de hoogte/apogee op te vragen) werken al. De vluchtlogica die ze vervolgens **gebruikt** om van `PAD_IDLE` naar `ASCENT` enz. te springen, zit nog niet in productie — de runtime-state is geschreven zodat die loop straks alleen `state.trig_*` en `state.max_alt_m` hoeft te lezen.
+> **Afkortingen** (eerste gebruik; zie [glossary](glossary.md) voor de
+> volledige lijst):
+> **CanSat** = flight-software op de Raspberry Pi Zero 2 W.
+> **Pico** = base station (Raspberry Pi Pico met Thonny).
+> **IMU** = BNO055 9-DoF sensor — levert oa. lineaire acceleratie
+> `‖a_lin‖`.
+> **BME280** = luchtdruk-/temperatuursensor — levert via ISA-formule een
+> hoogte in m boven `ground_hpa`.
+> **ISA** = International Standard Atmosphere, het omrekenmodel
+> `h ≈ 44330·(1 − (p/p₀)^0.19)`.
+> **EVT** = "event"-record dat de CanSat ongevraagd over de radio duwt
+> bij een state-transitie of mode-wissel.
+> **TLM** = "telemetry"-frame; in MISSION 1 Hz binaire frames van 60 B.
+> **`‖a_lin‖`** = norm van de gravity-compensated acceleratie-vector,
+> uitgedrukt in `g`.
 
-Zie ook: [Missie-states](mission_states.md) voor de bredere state-machine.
-
----
-
-## Overzicht
-
-| Trigger | Gebeurtenis | Sensor | Eenheid | Default | Range | Instelcommando |
-|---------|-------------|--------|---------|---------|-------|----------------|
-| **`ASCENT`** | Lancering: CanSat is voldoende ver **boven** het grondniveau gestegen | BME280 (druk → hoogte) | **m** (stijging) | **5.0 m** | 0.5 — 1000 m | `SET TRIGGER ASCENT <m>` |
-| **`DEPLOY`** | Apogee is voorbij: CanSat is **`DEP` meter gedaald vanaf de hoogste hoogte** die tot nu toe gezien is | BME280 + apogee-tracking (`max_alt_m`) | **m** (daling vanaf piek) | **3.0 m** | 0.5 — 100 m | `SET TRIGGER DEPLOY <m>` |
-| **`LAND`** | Teruggevallen tot op grondniveau (landing) | BME280 (hoogte t.o.v. `ground_hpa`) | **m** (boven grond) | **5.0 m** | 0.5 — 500 m | `SET TRIGGER LAND <m>` |
-
-Huidige waarden bekijken: `!triggers` op de Pico → bv. `OK TRIG ASC=5.0m/0.60hPa DEP=3.0m LND=5.0m`.
-Alle waarden vind je ook in `PREFLIGHT`-OK: `OK PRE ALL GND=1019.1 ASC=5.0m DEP=3.0m LND=5.0m`.
-
----
-
-## `ASCENT` — "zijn we gelanceerd?"
-
-**Vraag die de Zero zichzelf stelt (in `PAD_IDLE`):** "Ben ik nu minstens `ASC` meter hoger dan de grondreferentie?"
-
-- **Bron:** BME280-druk, vergeleken met `ground_hpa` (vastgelegd via `CAL GROUND` of `SET GROUND` tijdens CONFIG).
-- **Interne omrekening:** `ASC` (meters) wordt via de ISA-formule omgerekend naar een drukdaling in hPa. Rond zeeniveau geldt ongeveer **8,3 m per hPa**, dus 5 m ≈ 0,60 hPa — precies wat je terugziet in `GET TRIGGERS` zodra grond gekalibreerd is.
-- **Effect van de drempel:**
-  - **Te laag** (bv. 1 m): ruis op de BME280 of wind kan de trigger per ongeluk afschieten voor de raket vertrekt.
-  - **Te hoog** (bv. 50 m): we missen het begin van de ascent (of pieken te kort om het te zien) — camera en fast-log starten te laat.
-  - **Praktisch goed:** **3 — 10 m** voor een CanSat-opstelling. Start met de default **5 m**.
-- **Zelf instellen:** `SET TRIGGER ASCENT 5` → antwoord `OK TRIG ASCENT 5.00m`.
-- **Hoe checken zonder vlucht?** In CONFIG kan je `BME280` herhaaldelijk opvragen of `scripts/bme280_test.py --samples 50` draaien; het verschil tussen samples toont je de ruis en geeft een realistische ondergrens voor `ASC`.
-
-### BME280-ruis onder controle
-
-De radio-service start de BME280 standaard met **oversampling ×16 + IIR-filter ×16**. Met die instellingen zegt de datasheet ~0,3 Pa RMS, wat neerkomt op **σ ≈ 2 cm** per sample. Dat is ruim voldoende voor een 3 m DEPLOY-drempel.
-
-- Wil je zien hoe ruis evolueert, gebruik `scripts/bme280_test.py`:
-  - `python scripts/bme280_test.py --samples 200 --interval 0 --os 1 --iir 0` (ruw — ~0,1 hPa P2P ≈ 0,8 m)
-  - `python scripts/bme280_test.py --samples 200 --interval 0 --os 5 --iir 16` (stil — ~0,01 hPa P2P ≈ 8 cm)
-  - Het script print nu ook "hoogte-ruis" in meters naast hPa.
-- De service gebruikt vaste argumenten `--bme280-os 16 --bme280-iir 16` (aanbevolen voor vlucht). Overrides mogelijk via de unit of handmatig starten met andere waarden.
-- **`CAL GROUND`** middelt 16 samples bovenop de filter/oversampling → **σ ≈ 0,25 cm** op de grondreferentie. Dus kalibratie in CONFIG is voortaan erg stabiel.
-
-> **Waarom in meters, niet hPa?** Meters zijn voor iedereen intuïtief ("5 m hoog"); de omzetting naar hPa hangt af van het actuele weer. Door intern pas bij preflight/detectie om te rekenen naar hPa **met de huidige `ground_hpa`**, klopt de drempel ongeacht of het vandaag 1013 of 1020 hPa is.
+Zie ook: [Missie-states](mission_states.md) voor het grotere
+state-machine-plaatje.
 
 ---
 
-## `DEPLOY` — "is de parachute eruit? / dalen we?"
+## Filosofie: **OR-logica met IMU-primair, altitude-backup**
 
-**Vraag (in `ASCENT`):** "Is de huidige hoogte minstens `DEP` meter lager dan de **hoogste hoogte** die we tot nu toe gezien hebben?"
+Per transitie (`PAD_IDLE→ASCENT`, `ASCENT→DEPLOYED`, `DEPLOYED→LANDED`)
+evalueert de CanSat **meerdere triggers** in vaste volgorde. Zodra
+**één** trigger waar is, gaat de state vooruit. De eerste die vuurt,
+bepaalt ook de **`reason`-code** die in de `EVT STATE …` en het
+binary-log komt.
 
-- **Bron:** BME280-druk omgezet naar hoogte (zelfde ISA-formule als `ASCENT`), vergeleken met `state.max_alt_m`. Die **apogee** wordt bij elke BME280-lezing automatisch bijgewerkt — zowel via de MISSION-loop als via `GET ALT`/`BME280`-requests tijdens CONFIG-tests.
-- **Waarom niet op tijd?** Een tijd-drempel ("2 seconden na ASCENT") neemt niet mee hoe lang de motor brandt of hoe hoog de raket komt. Een **daling vanaf apogee** is fysisch het juiste criterium: je weet zeker dat je niet meer stijgt.
-- **Effect van de drempel:**
-  - **Te klein** (bv. 0,5 m): ruis op de BME280 of een windvlaag kan DEPLOY per ongeluk triggeren vóór het echte hoogtepunt.
-  - **Te groot** (bv. 20 m): we detecteren pas heel laat; relevant log wordt gemist.
-  - **Praktisch:** **2 — 5 m** voor een CanSat. Start met de default **3 m**.
-- **Zelf instellen:** `SET TRIGGER DEPLOY 3.0` → antwoord `OK TRIG DEPLOY 3.00m`.
-- **Apogee inspecteren / resetten:** `!apogee` (→ `OK APOGEE <m> <hPa> <age_s>`), `!resetapogee` (→ `OK APOGEE RESET`). Voor een test kan je `!resetapogee` gebruiken voor je opnieuw begint.
+Waarom niet één enkele trigger? Een echte raket-launch is zo'n
+zeldzaam moment dat we er drie kansen willen hebben om 'm niet te
+missen:
+
+| Trigger-type | Sterkte | Zwakte |
+|---|---|---|
+| **IMU (g-waarde / freefall / stable)** | Snel (<100 ms), onafhankelijk van weer en grondreferentie | BNO055 kan een hick-up hebben; calibratie moet voldoende zijn |
+| **Altitude (BME280 + ISA)** | Robuust, langetermijn-drift laag na `CAL GROUND` | Traag (~1 s door IIR-filter); gevoelig voor drukverandering door weer |
+
+De altitude-backups zorgen dat we **toch** in DEPLOYED geraken als de
+IMU bv. even in een NaN hangt — kritisch want **we hebben maar één
+lancering**.
 
 ---
 
-## `LAND` — "liggen we op de grond?"
+## Overzicht van alle drempels
 
-**Vraag (in `DEPLOYED`):** "Zijn we teruggevallen tot binnen `LND` meter van de grondreferentie, en is de beweging 'rustig'?"
+| State-transitie | Reason | Trigger | Sensor | Eenheid | Default | Range | SET-commando |
+|-----------------|--------|---------|--------|---------|---------|-------|--------------|
+| `PAD_IDLE → ASCENT` | **`ACC`** | Piek `‖a_lin‖` ≥ drempel | IMU | **g** | **6.0 g** | 0.5 – 20 g | `SET TRIG ASC ACC <g>` |
+|                    | **`ALT`** (backup) | Hoogte ≥ drempel boven grond | BME280 | **m** | **5.0 m** | 0.5 – 1000 m | `SET TRIG ASC HEIGHT <m>` |
+| `ASCENT → DEPLOYED` | **`FREEFALL`** | Aaneensluitende vrije val ≥ drempel | IMU | **s** | **1.0 s** | 0.05 – 10 s | `SET TRIG DEP FREEFALL <s>` |
+|                     | **`SHOCK`** | Piek `‖a‖` ≥ drempel (parachute-snap) | IMU | **g** | **8.0 g** | 1 – 20 g | `SET TRIG DEP SHOCK <g>` |
+|                     | **`DESCENT`** (backup) | `max_alt − current_alt` ≥ drempel | BME280 + apogee | **m** | **3.0 m** | 0.5 – 100 m | `SET TRIG DEP DESCENT <m>` |
+| `DEPLOYED → LANDED` | **`IMPACT`** | Piek `‖a‖` ≥ drempel (touchdown-schok) | IMU | **g** | **12.0 g** | 1 – 30 g | `SET TRIG LND IMPACT <g>` |
+|                     | **`STABLE`** | Hoogte stabiel binnen ruis voor ≥ drempel | BME280 | **s** | **8.0 s** | 1 – 60 s | `SET TRIG LND STABLE <s>` |
+|                     | **`ALT`** (backup) | Hoogte ≤ drempel boven grond | BME280 | **m** | **5.0 m** | 0.5 – 500 m | `SET TRIG LND ALT <m>` |
 
-- **Bron:** BME280-hoogte (drukdaling hersteld naar bijna grond) + BNO055 die weinig beweging meldt.
-- **Effect:**
-  - **Te klein** (bv. 1 m): door ruis of windschokken denkt de CanSat dat hij nog niet geland is → radio blijft onnodig aan.
-  - **Te groot** (bv. 50 m): de CanSat schakelt al naar `LANDED` terwijl hij nog stevig zweeft.
-  - **Praktisch:** **3 — 10 m**. Start met de default **5 m**.
-- **Zelf instellen:** `SET TRIGGER LAND 10` → antwoord `OK TRIG LAND 10.00m`.
+> **Legacy-alias**: `SET TRIGGER ASCENT <m>`, `SET TRIGGER DEPLOY <m>`,
+> `SET TRIGGER LAND <m>` blijven werken voor back-compat (oude
+> operator-tools). Ze zetten dezelfde altitude-backup-velden als hun
+> nieuwe `SET TRIG …`-tegenhanger.
+
+Alle drempels live ophalen:
+
+| Commando | Reply-voorbeeld | Wat zie je |
+|---|---|---|
+| `GET TRIGGERS` | `OK TRIG ASC=5.0m/0.60hPa DEP=3.0m LND=5.0m` | Compacte **altitude-only** weergave (oudere tooling-compat). hPa-equivalent alleen zichtbaar als `ground_hpa` al gekalibreerd is. |
+| `GET TRIG ALL` | `OK TRIG A=5.0m/6.0g D=3.0m/8.0g/1.0s L=5.0m/12.0g/8.0s` | **Volledige** multi-trigger view; past net binnen 60 B. |
+| `PREFLIGHT` (als OK) | `OK PRE ALL GND=1019.1 ASC=5.0m DEP=3.0m LND=5.0m` | Handig als confirmatie net vóór `SET MODE MISSION`. |
+
+---
+
+## Reason-codes in detail
+
+De flight-state machine vuurt in de volgorde uit de tabel; de **eerste
+match** wint en belandt als `reason` in `EVT STATE <NAME> <REASON>` en
+in het binary-log.
+
+```text
+PAD_IDLE → ASCENT
+  1. ACC       peak ‖a_lin‖ ≥ trig_ascent_accel_g           (IMU, primair)
+  2. ALT       alt_m ≥ trig_ascent_height_m                 (BME280, backup)
+
+ASCENT → DEPLOYED
+  1. FREEFALL  freefall_for_s ≥ trig_deploy_freefall_s      (IMU, primair)
+  2. SHOCK     peak ‖a‖ ≥ trig_deploy_shock_g               (IMU, parachute-snap)
+  3. DESCENT   max_alt − alt ≥ trig_deploy_descent_m        (BME280, backup)
+
+DEPLOYED → LANDED
+  1. IMPACT    peak ‖a‖ ≥ trig_land_impact_g                (IMU, touchdown)
+  2. STABLE    alt_stable_for_s ≥ trig_land_stable_s        (BME280, rust)
+  3. ALT       alt_m ≤ trig_land_hz_m                       (BME280, backup)
+```
+
+Een transitie verschijnt ook live op het base station:
+
+```text
+BS>
+RX <- EVT STATE ASCENT ACC           (direct na launch)
+RX <- EVT STATE DEPLOYED FREEFALL    (parachute-deploy)
+RX <- EVT STATE LANDED IMPACT        (touchdown)
+```
+
+Zie [Missie-states §Autonome state-advance](mission_states.md#autonome-state-advance)
+voor hoe vaak deze evaluatie loopt (≈5 Hz, gedreven door de
+sensor-sampler, onafhankelijk van Pico-commando's).
+
+---
+
+## Per trigger: motivatie + tuning-tips
+
+### `PAD_IDLE → ASCENT`
+
+#### `ACC` — motor-burn-piek (IMU, primair)
+
+- **Bron**: BNO055 lineaire acceleratie (gravity verwijderd). Norm over
+  x/y/z, gerapporteerd als "peak-over-laatste-window" door de sampler.
+- **Wat verwacht?** Hobby-raket-launch: 5 – 15 g gedurende ~0,5 s.
+- **Default 6.0 g**: genoeg marge boven alles wat je met de hand doet
+  (oppakken = 3 – 5 g, laten vallen op tafel = 3 – 4 g), net onder een
+  minimale motor-burn.
+- **Te laag (bv. 3 g)**: indoor-test triggert per ongeluk door
+  oppakken / wegleggen.
+- **Te hoog (bv. 12 g)**: zwakke booster haalt 'm niet → we vallen
+  terug op de `ALT`-backup (trager, maar werkt nog).
+
+#### `ALT` — hoogte-backup (BME280)
+
+- **Bron**: BME280-druk, via ISA-formule omgerekend naar m boven
+  `ground_hpa`.
+- **Default 5.0 m** ≈ **0,60 hPa** (rond zeeniveau: ~8,3 m/hPa). Bij een
+  gekalibreerde grond zie je dat exact in `GET TRIGGERS`:
+  `ASC=5.0m/0.60hPa`.
+- **Te laag (1 m)**: BME280-ruis of windvlaag schiet 'm af vóór vertrek.
+- **Te hoog (50 m)**: we missen het begin van de ascent en de camera /
+  fast-log starten laat.
+- **Praktisch goed**: 3 – 10 m. Start met de default.
+
+### `ASCENT → DEPLOYED`
+
+#### `FREEFALL` — motor uit, nog vóór parachute (IMU)
+
+- **Bron**: sampler telt **aaneensluitende** secondes waarin
+  `‖a_lin‖ ≤ 0,3 g` (tijdelijke drempel in de sampler; niet radio-
+  configureerbaar want fundamenteel fysisch).
+- **Default 1.0 s** ≈ valdiepte van ~5 m. Kort genoeg om voor deployment
+  nog parachute-tijd te hebben, lang genoeg om één BNO055-hickup te
+  overleven.
+- **Te klein (0,1 s)**: elke korte shake triggert.
+- **Te groot (3 s)**: we vallen meter(s) dieper voor detectie.
+
+#### `SHOCK` — parachute-snap (IMU)
+
+- **Bron**: piek `‖a‖` (**niet** gravity-verwijderd, want de snap is zo
+  kort dat lineair filteren 'm eet).
+- **Default 8.0 g**: parachute-snap is typisch 5 – 20 g.
+- Handig als 2e lijn naast `FREEFALL` — een snelle, harde chute-open
+  gaat vaak door `FREEFALL` heen vóór die z'n secondes heeft volgemaakt.
+
+#### `DESCENT` — apogee-backup (BME280)
+
+- **Bron**: `state.max_alt_m` wordt bijgewerkt **bij elke** BME280-read
+  (ook tijdens CONFIG-tests via `GET ALT`). Vergelijking:
+  `max_alt − current_alt ≥ drempel`.
+- **Default 3.0 m**: filterruis ≪ drempel (σ ≈ 2 cm bij IIR×16, OSP×16).
+- **Waarom niet op tijd?** Een "X seconden na ASCENT"-drempel werkt niet
+  voor verschillende motoren; fysisch is "we dalen vanaf het hoogste
+  punt" de juiste definitie.
+- **Apogee inspecteren / resetten**: `!apogee` → `OK APOGEE <m> <hPa>
+  <age_s>`; `!resetapogee` (CONFIG-only) voor een clean start.
+
+> **Belangrijk**: `!apogee` wordt **automatisch gereset** bij elke
+> `SET MODE MISSION`. Je hoeft er dus in de preflight-checklist geen
+> extra `!resetapogee` meer voor te doen — de CanSat ziet zelf de
+> overgang CONFIG→MISSION en zet `max_alt_m` op `None`.
+
+### `DEPLOYED → LANDED`
+
+#### `IMPACT` — touchdown-schok (IMU)
+
+- **Bron**: piek `‖a‖` (raw, gravity niet weggehaald).
+- **Default 12.0 g**: gras ~5 – 10 g, asfalt ~10 – 30 g. Op gras krijg
+  je soms een "zachte" landing die de drempel niet haalt → `STABLE`
+  vangt dat op.
+
+#### `STABLE` — aanhoudende rust (BME280)
+
+- **Bron**: sampler telt `alt_stable_for_s` — secondes waarin de
+  hoogte binnen ruis (~σ·2) rond z'n gemiddelde blijft.
+- **Default 8.0 s**: lang genoeg om wind-turbulentie onder parachute
+  te overleven, kort genoeg dat een zachte landing niet onopgemerkt
+  doorstaat.
+
+#### `ALT` — backup onder drempel-hoogte (BME280)
+
+- **Bron**: huidige hoogte ≤ `trig_land_hz_m` (default 5.0 m boven
+  grond).
+- Defensief: als IMPACT én STABLE falen (bv. continue lichte
+  trillingen doordat de CanSat tegen een boom tikt), dan nog geraken
+  we in LANDED zodra we op grondniveau hangen.
 
 ---
 
@@ -81,38 +212,71 @@ De radio-service start de BME280 standaard met **oversampling ×16 + IIR-filter 
 
 Voor debuggen en om gevoel te krijgen voor realistische drempels:
 
-- **`!alt`** → `OK ALT <m_boven_grond> <hPa>`; mag ook tijdens MISSION. Vereist actieve BME280 en een gekalibreerde grond (`!calground` of `SET GROUND`). Elke aanroep **werkt ook de apogee bij**.
-- **`!apogee`** → `OK APOGEE <m> <hPa> <age_s>` (age = secondes sinds het piekmoment gemeten werd) of `OK APOGEE NONE` als er nog niks is opgemeten.
-- **`!resetapogee`** → zet de tracking terug op nul (alleen in CONFIG).
-
-Apogee wordt automatisch gevolgd bij elke BME280-lezing: `GET ALT`, `BME280`/`READ BME280` en binnenkort de MISSION-loop zelf. Je hoeft dus niets speciaals aan te zetten — zolang grond gekalibreerd is, loopt de teller.
-
----
-
-## Workflow samengevat
-
-1. **`!time`** — zet de systeemklok (correcte foto-/lognamen en log-timestamps).
-2. **`!calground`** — gemiddelde BME280-druk wordt `ground_hpa` (grondreferentie).
-3. **`!alt`** / **`!apogee`** — sanity-check: hoogte ≈ 0 m net boven de tafel, apogee begint op `NONE`.
-4. **`!triggers`** — check de defaults. Niet tevreden? Pas aan met `SET TRIGGER …`.
-5. **`SET FREQ <mhz>`** (éénmalig) — persistent aan beide kanten.
-6. **`!resetapogee`** — zet de apogee-teller op nul vlak vóór je in MISSION gaat.
-7. **`!preflight`** — moet `OK PRE ALL …` teruggeven.
-8. **`SET MODE MISSION`** — Zero gaat naar `PAD_IDLE` met de **op dat moment actieve** trigger-waarden. Na deze stap worden triggers en grondreferentie niet meer aangepast over de radio (CONFIG-only). `!alt` en `!apogee` blijven wél werken voor telemetrie.
+- **`!alt`** → `OK ALT <m_boven_grond> <hPa>`; mag ook tijdens MISSION.
+  Vereist actieve BME280 + gekalibreerde grond (`!calground` of
+  `SET GROUND`). Werkt ook de apogee bij.
+- **`!apogee`** → `OK APOGEE <m> <hPa> <age_s>` (age = secondes sinds
+  het piekmoment gemeten werd), of `OK APOGEE NONE` als er nog niks
+  is opgemeten.
+- **`!resetapogee`** → zet de tracking terug op nul (alleen CONFIG).
+- **`!triggers`** en **`!trigall`** (→ `GET TRIGGERS` resp. `GET TRIG
+  ALL`) tonen de huidige drempels.
 
 ---
 
-## Defaults in één overzicht
+## Workflow-samenvatting vóór een vlucht
+
+1. **`!time`** / **`!timeepoch …`** — systeemklok (correcte foto-/
+   lognamen en log-timestamps).
+2. **`!calground`** — gemiddelde BME280-druk wordt `ground_hpa`.
+3. **`!alt`** — sanity-check: hoogte ≈ 0 m net boven de tafel.
+4. **`!trigall`** — bekijk alle drempels. Niet tevreden? Pas aan met
+   `SET TRIG …` (zie tabel). Je mag ook de legacy
+   `SET TRIGGER ASCENT/DEPLOY/LAND <m>` gebruiken.
+5. **`SET FREQ <mhz>`** (éénmalig, persistent op beide kanten).
+6. **`!preflight`** — moet `OK PRE ALL …` teruggeven. `SVO` moet dan
+   ook in orde zijn (zie [servo_tuning.md](servo_tuning.md)).
+7. **`SET MODE MISSION`** — Zero voert zelf apogee-reset uit en gaat
+   naar `PAD_IDLE` met de op dat moment actieve trigger-waarden. Vanaf
+   hier zijn `SET TRIGGER` / `SET TRIG` / `SET GROUND` geblokkeerd
+   (`ERR BUSY MISSION`); `!alt` en `!apogee` blijven wél werken voor
+   telemetrie.
+
+---
+
+## Defaults in één oogopslag
 
 | Constante (code) | Waarde | Betekenis |
 |------------------|--------|-----------|
-| `DEFAULT_ASCENT_HEIGHT_M` | 5.0 | stijging m voor `ASCENT`-detectie |
-| `DEFAULT_DEPLOY_DESCENT_M` | 3.0 | daling vanaf apogee vóór `DEPLOY` triggert |
-| `DEFAULT_LAND_HZ_M` | 5.0 | terugval tot binnen deze hoogte boven grond ⇒ `LANDED` |
-| `PREFLIGHT_BNO_SYS_MIN` | 1 | BNO055 systeem-calibratie minimum (van 0..3) |
-| `GROUND_CAL_SAMPLES` | 16 | aantal BME280-samples voor `CAL GROUND` |
+| `DEFAULT_ASCENT_HEIGHT_M` | **5.0** | Stijging (m) voor `ASCENT`-backup |
+| `DEFAULT_ASCENT_ACC_G` | **6.0** | Peak `‖a_lin‖` (g) voor `ASCENT` primair |
+| `DEFAULT_DEPLOY_DESCENT_M` | **3.0** | Daling vanaf apogee (m) voor `DEPLOYED`-backup |
+| `DEFAULT_DEPLOY_FREEFALL_S` | **1.0** | Vrije val (s) voor `DEPLOYED` primair |
+| `DEFAULT_DEPLOY_SHOCK_G` | **8.0** | Chute-snap piek (g) voor `DEPLOYED` 2e IMU |
+| `DEFAULT_LAND_HZ_M` | **5.0** | Hoogte ≤ … (m) voor `LANDED`-backup |
+| `DEFAULT_LAND_IMPACT_G` | **12.0** | Touchdown-piek (g) voor `LANDED` primair |
+| `DEFAULT_LAND_STABLE_S` | **8.0** | Rust-duur (s) voor `LANDED` 2e BME280 |
+| `PREFLIGHT_BNO_SYS_MIN` | **1** | BNO055 sys-cal minimum (0 – 3) voor preflight |
+| `GROUND_CAL_SAMPLES` | **4** | BME280-samples gemiddeld na priming-burst voor `CAL GROUND` |
 
-Deze defaults staan in `src/cansat_hw/radio/wire_protocol.py` — aanpassen vereist wel een deploy van de Zero-code. Voor dagelijks tunen gebruik je `SET TRIGGER …` vanaf de Pico; die keuze blijft in RAM tot reboot of `SET MODE CONFIG → MISSION` cyclus.
+Alles staat in `src/cansat_hw/radio/wire_protocol.py`. Aanpassen vereist
+een deploy van de Zero-code; voor dagelijks tunen gebruik je
+`SET TRIG …` vanaf de Pico — dat blijft in RAM tot reboot of
+`SET MODE CONFIG → MISSION`-cyclus.
+
+---
+
+## BME280-ruis & IIR-filter (kort)
+
+Oversampling ×16 + IIR ×16 geeft volgens de datasheet ~0,3 Pa RMS ≈
+**σ ≈ 2 cm** per sample. Meer dan genoeg voor een 3 m
+`DEPLOY DESCENT`-drempel.
+
+De filter-coëfficient wordt automatisch per mode geschakeld: in `CONFIG`
+IIR×4 (responsief voor handmatige `!alt`), in `TEST`/`MISSION` IIR×16
+(stil signaal voor apogee- en deploy-detectie). Zie
+[mission_states.md](mission_states.md#bme280-iir-filter-per-mode) voor
+details en override-opties.
 
 ---
 

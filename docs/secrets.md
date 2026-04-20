@@ -1,5 +1,13 @@
 # Geheimen & lokale configuratie
 
+> **Afkortingen** (eerste gebruik; volledige lijst in
+> [glossary.md](glossary.md)):
+> **AES** = Advanced Encryption Standard (symmetrische cipher).
+> **RFM69** = LoRa-achtige radiotransceiver-module op SPI.
+> **MQTT** = lichtgewicht publish-subscribe protocol voor telemetrie.
+> **Pico** = base station (Raspberry Pi Pico, MicroPython).
+> **Zero** = flight-computer (Raspberry Pi Zero 2 W, CPython).
+
 Sommige waarden horen **niet in git**: de belangrijkste is de **16-byte AES-sleutel**
 die de RFM69 gebruikt om radioverkeer te versleutelen. We volgen de gangbare
 Python-conventies — op twee kanten een ander bestand omdat de Pico in MicroPython
