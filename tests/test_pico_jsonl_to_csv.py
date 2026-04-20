@@ -100,6 +100,52 @@ class RowFromRecordTest(unittest.TestCase):
 		self.assertEqual(row["utc_iso"], "2026-04-19T13:58:04.733Z")
 		self.assertNotEqual(row["accel_mag_g"], "")
 		self.assertAlmostEqual(float(row["accel_mag_g"]), 1.01477, places=3)
+		# Slot 0 = de enige tag (id 23), dz_cm=3 → 0.03 m. Slot 1 moet
+		# leeg zijn zodat Power BI er geen spurious 0-punt van maakt.
+		self.assertEqual(row["tag0_id"], "23")
+		self.assertEqual(row["tag0_dx_m"], "0.01")
+		self.assertEqual(row["tag0_dy_m"], "0.02")
+		self.assertEqual(row["tag0_dz_m"], "0.03")
+		self.assertEqual(row["tag0_size_mm"], "46")
+		self.assertEqual(row["tag1_id"], "")
+		self.assertEqual(row["tag1_dz_m"], "")
+
+	def test_two_tags_populate_both_slots_in_order(self) -> None:
+		tool = _load_tool()
+		rec = _binary_tlm_rx(
+			parsed_overrides={
+				"tag_count": 2,
+				# Grootste tag eerst (Zero-side ``TagBuffer`` sorteert al
+				# descending op pixel-size; we verifiëren enkel dat onze
+				# CSV die volgorde **behoudt** i.p.v. te hersorteren).
+				"tags": [
+					{"id": 26, "dx_cm": 10, "dy_cm": -5, "dz_cm": 1234, "size_mm": 4500},
+					{"id": 4, "dx_cm": 0, "dy_cm": 0, "dz_cm": 4567, "size_mm": 1100},
+				],
+			}
+		)
+		row = tool._row_from_record(rec, "f")
+		assert row is not None
+		self.assertEqual(row["tag_count"], "2")
+		self.assertEqual(row["tag0_id"], "26")
+		self.assertEqual(row["tag0_dz_m"], "12.34")
+		self.assertEqual(row["tag0_size_mm"], "4500")
+		self.assertEqual(row["tag1_id"], "4")
+		self.assertEqual(row["tag1_dz_m"], "45.67")
+		self.assertEqual(row["tag1_size_mm"], "1100")
+
+	def test_no_tags_leaves_all_slot_columns_empty(self) -> None:
+		tool = _load_tool()
+		rec = _binary_tlm_rx(parsed_overrides={"tag_count": 0, "tags": []})
+		row = tool._row_from_record(rec, "f")
+		assert row is not None
+		self.assertEqual(row["tags"], "")
+		self.assertEqual(row["tag0_id"], "")
+		self.assertEqual(row["tag0_dx_m"], "")
+		self.assertEqual(row["tag0_dz_m"], "")
+		self.assertEqual(row["tag0_size_mm"], "")
+		self.assertEqual(row["tag1_id"], "")
+		self.assertEqual(row["tag1_dz_m"], "")
 
 	def test_non_rx_records_are_skipped(self) -> None:
 		tool = _load_tool()

@@ -45,6 +45,18 @@ CSV) waar er overlap is, met enkele Pico-specifieke velden vooraan:
   gyro, BNO-cal 0..3)
 - ``accel_mag_g``          ‖(ax,ay,az)‖, diagnostisch (zoals ``decode_logs.py``)
 - ``tag_count`` + ``tags`` (``id@dx×dy×dz:size_mm;…``)
+- ``tag0_id``, ``tag0_dx_m``, ``tag0_dy_m``, ``tag0_dz_m``, ``tag0_size_mm``
+- ``tag1_id``, ``tag1_dx_m``, ``tag1_dy_m``, ``tag1_dz_m``, ``tag1_size_mm``
+
+De per-slot tag-kolommen zijn **platgeslagen** zodat tools als Power BI,
+Excel of Pandas direct ``tag0_dz_m`` tegen de tijd kunnen plotten zonder
+eerst een `;`/`@`/`x`/`:`-string te moeten parsen. Slot 0 bevat altijd
+de **grootste** tag (de Zero sorteert descending op pixel-size vóór
+packen). Slot 1 is leeg als er maar één tag gezien werd; beide slots
+leeg bij ``tag_count=0``. Alle offsets staan in **meter** (consistent
+met ``alt_m``); enkel ``size_mm`` blijft in millimeter omdat het een
+geregistreerde fysieke tag-afmeting is (zie ``config/camera/
+tag_registry.json``), geen meetwaarde.
 
 Text-TLM (oudere TEST-regel-formaat) mist veel van deze velden —
 kolommen die er niet zijn blijven gewoon leeg.
@@ -61,6 +73,20 @@ import time
 from pathlib import Path
 from typing import Any, Iterator, List, Mapping, Optional, TextIO, Tuple
 
+
+#: Aantal vaste tag-slots dat we in de CSV platslaan. Moet ≥ het aantal
+#: tag-slots in het binary TLM-frame (:data:`cansat_hw.telemetry.codec.NUM_TAGS`,
+#: momenteel 2). Extra slots schaden niet — ze blijven leeg. We hardcoderen
+#: deze waarde bewust om de CSV-header stabiel te houden; dan kan een Power
+#: BI/Excel-rapport van een oudere vlucht gewoon opnieuw de recente CSV
+#: openen zonder dat de kolom-layout verandert.
+_NUM_TAG_SLOTS = 2
+
+_TAG_SLOT_COLUMNS: Tuple[str, ...] = tuple(
+	"tag%d_%s" % (i, suffix)
+	for i in range(_NUM_TAG_SLOTS)
+	for suffix in ("id", "dx_m", "dy_m", "dz_m", "size_mm")
+)
 
 COLUMNS: Tuple[str, ...] = (
 	"file",
@@ -92,7 +118,7 @@ COLUMNS: Tuple[str, ...] = (
 	"mag_cal",
 	"tag_count",
 	"tags",
-)
+) + _TAG_SLOT_COLUMNS
 
 
 def _fmt_field(value: Any) -> str:
@@ -167,6 +193,41 @@ def _tags_to_str(tags: Any) -> str:
 	return ";".join(out)
 
 
+def _tag_slot_fields(tags: Any) -> dict:
+	"""Plat gestructureerde per-slot tag-kolommen voor de CSV.
+
+	Retourneert een dict met keys ``tag0_id``, ``tag0_dx_m``, ``tag0_dy_m``,
+	``tag0_dz_m``, ``tag0_size_mm`` (en analoog voor ``tag1_*`` etc.). Offsets
+	worden van het wire-formaat (cm, int16) omgezet naar **meter** en
+	geformatteerd via :func:`_fmt_field` (max 2 decimalen zinvol). Slots
+	zonder detectie blijven leeg — handig in Power BI, dan toont de grafiek
+	gewoon geen punt i.p.v. een nul.
+	"""
+	out: dict = {col: "" for col in _TAG_SLOT_COLUMNS}
+	if not tags:
+		return out
+	for i, tag in enumerate(tags):
+		if i >= _NUM_TAG_SLOTS:
+			break
+		if not isinstance(tag, Mapping):
+			continue
+		try:
+			tid = int(tag["id"])
+			dx_m = int(tag["dx_cm"]) / 100.0
+			dy_m = int(tag["dy_cm"]) / 100.0
+			dz_m = int(tag["dz_cm"]) / 100.0
+			size_mm = int(tag["size_mm"])
+		except (KeyError, TypeError, ValueError):
+			continue
+		prefix = "tag%d_" % i
+		out[prefix + "id"] = _fmt_field(tid)
+		out[prefix + "dx_m"] = _fmt_field(dx_m)
+		out[prefix + "dy_m"] = _fmt_field(dy_m)
+		out[prefix + "dz_m"] = _fmt_field(dz_m)
+		out[prefix + "size_mm"] = _fmt_field(size_mm)
+	return out
+
+
 def _row_from_record(rec: Mapping[str, Any], file_label: str) -> Optional[dict]:
 	"""Geef een CSV-rij als ``rec`` een TLM-RX-record is; anders ``None``."""
 	if rec.get("dir") != "RX":
@@ -174,7 +235,7 @@ def _row_from_record(rec: Mapping[str, Any], file_label: str) -> Optional[dict]:
 	parsed = rec.get("parsed")
 	if not isinstance(parsed, Mapping) or parsed.get("kind") != "TLM":
 		return None
-	return {
+	row: dict = {
 		"file": file_label,
 		"t": rec.get("t") or "",
 		"dt_ms": _fmt_field(rec.get("dt_ms")),
@@ -205,6 +266,8 @@ def _row_from_record(rec: Mapping[str, Any], file_label: str) -> Optional[dict]:
 		"tag_count": _fmt_field(parsed.get("tag_count")),
 		"tags": _tags_to_str(parsed.get("tags")),
 	}
+	row.update(_tag_slot_fields(parsed.get("tags")))
+	return row
 
 
 def iter_tlm_rows(
