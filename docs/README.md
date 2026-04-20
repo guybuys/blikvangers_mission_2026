@@ -14,7 +14,7 @@ Uitgebreidere notities en hardware-informatie. De **projectintro en installatie*
 ## Radio — base station (Pico) & commando-protocol
 
 - **[Pico base station CLI + draad-protocol](../../pico_files/Orginele%20cansat/RadioReceiver/README_basestation.md)**  
-  Thonny, lokale `!`-commando’s, tekstregels naar de CanSat.
+  Thonny, lokale `!`-commando’s, tekstregels naar de CanSat. JSONL-log via `!log on` — met [`scripts/pico_jsonl_to_csv.py`](../scripts/pico_jsonl_to_csv.py) kan je die ná een sessie in één stap naar CSV (Excel) converteren.
 - **CanSat (Zero 2 W):** `python scripts/cansat_radio_protocol.py` vanuit de repo-root (zie [project-README](../README.md)).
 - **[Radio-service (systemd) — bedienings-spiekbriefje](cansat_radio_service.md)** — start/stop, log volgen, herstarten, `STOP RADIO` vs `systemctl`, valkuilen bij autostart op de Zero.
 - **[Zero-logs ophalen, archiveren & decoderen](zero_logs.md)** — `scripts/fetch_zero_logs.sh` (rsync + journal + automatische decode), `scripts/decode_logs.py` (summary / CSV / raw), lokale layout `zero_logs/latest/` + `archive/<timestamp>/`, en hoe je snel state-transities, peak-altitude en peak-‖a‖ uit een sessie haalt.

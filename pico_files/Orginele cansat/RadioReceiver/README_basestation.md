@@ -154,6 +154,25 @@ mission = df[df["mode"] == "MISSION"]
 alt = pd.json_normalize(mission["parsed"])
 ```
 
+**Snelle CSV-export zonder pandas** — handig als je op de laptop onmiddellijk
+na een sessie de TLM-metingen in Excel/Numbers wil openen:
+
+```bash
+# Kopieer eerst cansat_<ts>.jsonl van de Pico-flash naar de laptop
+# (Thonny: rechtsklik → "Kopiëren naar computer", of `mpremote cp :…`).
+
+python scripts/pico_jsonl_to_csv.py cansat_20260419_135804.jsonl
+# → cansat_20260419_135804.csv naast de input (één rij per TLM-frame)
+
+python scripts/pico_jsonl_to_csv.py -o combined.csv *.jsonl   # meerdere sessies
+python scripts/pico_jsonl_to_csv.py -o - session.jsonl | head # pipe naar stdout
+```
+
+Kolomvolgorde volgt `scripts/decode_logs.py` (Zero-side `.bin` → CSV) met
+Pico-specifieke velden vooraan (`t`, `dt_ms`, `rssi`). Zo zijn beide CSV's
+direct vergelijkbaar. Alleen `RX`-records met `parsed.kind == "TLM"` landen
+als data-rij; andere records (TX, INFO, `OK ALT …`, …) worden overgeslagen.
+
 **Let op Pico-flash:** een log-bestand van ~200 KB (≈ een uur vliegen met `!alt` elke seconde) past prima; elke write `flush()`t direct, zodat je bij een reset geen regels verliest. Schakel `!log off` aan het eind van een sessie zodat de file netjes wordt gesloten. Voor lange sessies: regelmatig nieuwe file (`!log off` + `!log on`) — blokken van ~1 MB blijven handelbaar.
 
 ### Servo-tuning / park / home vanaf de Pico (snelkaart)
