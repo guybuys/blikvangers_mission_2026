@@ -159,10 +159,18 @@ class TestMetricsToBuffered(unittest.TestCase):
 		buf = metrics_to_buffered(m, captured_at=0.0)
 		self.assertEqual(buf.detection.dz_cm, 0x7FFF)  # clamped
 
-	def test_tag_id_masked_to_u8(self) -> None:
+	def test_tag_id_preserved_full_u16(self) -> None:
+		"""Regressie: tag_id mag NIET meer naar 8 bits worden gemaskerd.
+
+		Vóór de u16-migratie van het codec-veld werd hier ``& 0xFF`` gedaan,
+		waardoor de papieren test-tag 358 als 102 (= 358 & 0xFF) in de
+		TLM/CSV verscheen. De afstand-berekening bleef wel correct want die
+		gebruikt de volle ID voor de registry-lookup; maar de operator-
+		zichtbare ID was misleidend.
+		"""
 		corners = _square_corners(2028.0, 1520.0, 100.0)
 		m = compute_metrics(
-			tag_id=0x1234,
+			tag_id=358,
 			corners_px=corners,
 			image_w=4056,
 			image_h=3040,
@@ -170,7 +178,20 @@ class TestMetricsToBuffered(unittest.TestCase):
 		)
 		assert m is not None
 		buf = metrics_to_buffered(m)
-		self.assertEqual(buf.detection.tag_id, 0x34)
+		self.assertEqual(buf.detection.tag_id, 358)
+
+		# Sentinel-rand: 0xFFFF is gereserveerd (TAG_ID_NA), dus clampen
+		# naar 0xFFFE. 0xFFFE zelf moet ongewijzigd doorkomen.
+		m2 = compute_metrics(
+			tag_id=0xFFFF,
+			corners_px=corners,
+			image_w=4056,
+			image_h=3040,
+			registry=self.reg,
+		)
+		assert m2 is not None
+		buf2 = metrics_to_buffered(m2)
+		self.assertEqual(buf2.detection.tag_id, 0xFFFE)
 
 
 if __name__ == "__main__":

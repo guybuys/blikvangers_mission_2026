@@ -190,8 +190,13 @@ def metrics_to_buffered(
 	dy_cm = _clamp_i16(int(round(metrics.dy_m * 100.0)))
 	dz_cm = _clamp_i16(int(round(metrics.distance_m * 100.0)))
 	size_mm = max(0, min(0xFFFF, int(metrics.size_mm)))
+	# tag_id past sinds de u16-migratie volledig in het codec-veld; clamp
+	# alleen op het codec-bereik (0..0xFFFE; 0xFFFF is sentinel TAG_ID_NA).
+	# Vóór de fix stond hier ``& 0xFF`` waardoor 358 → 102 in de TLM/CSV
+	# verscheen (registry-lookup gebeurt op de volle ID, dus distance bleef
+	# correct — alleen de gerapporteerde ID was misleidend).
 	det = TagDetection(
-		tag_id=int(metrics.tag_id) & 0xFF,
+		tag_id=max(0, min(0xFFFE, int(metrics.tag_id))),
 		dx_cm=dx_cm,
 		dy_cm=dy_cm,
 		dz_cm=dz_cm,
