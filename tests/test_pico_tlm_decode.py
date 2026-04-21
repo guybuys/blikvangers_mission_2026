@@ -166,6 +166,37 @@ class CrossSideRoundTripTest(unittest.TestCase):
 		# is één van de vier 1.1 m missie-tags (85, 235, 317, 536).
 		self.assertIn("[26@12.3m 85@45.7m]", line)
 
+	def test_pico_decoder_handles_tag_ids_above_255(self) -> None:
+		"""Regressie: de Pico decoder moet tag IDs > 255 (zoals 317, 536)
+		ongewijzigd door geven. Vroeger was tag_id u8 in het frame, dus IDs
+		boven 255 verloren bits.
+		"""
+		from cansat_hw.telemetry.codec import (
+			MODE_MISSION,
+			STATE_DEPLOYED,
+			TagDetection,
+			pack_tlm,
+		)
+
+		pico = _import_pico_decoder()
+		raw = pack_tlm(
+			mode=MODE_MISSION,
+			state=STATE_DEPLOYED,
+			seq=10,
+			utc_seconds=1_700_000_000,
+			utc_ms=0,
+			tags=[
+				TagDetection(tag_id=317, dx_cm=0, dy_cm=0, dz_cm=2500, size_mm=1100),
+				TagDetection(tag_id=536, dx_cm=0, dy_cm=0, dz_cm=4000, size_mm=1100),
+			],
+		)
+		decoded = pico.decode_tlm(raw)
+		ids = [t["id"] for t in decoded["tags"]]
+		self.assertEqual(ids, [317, 536])
+		line = pico.format_tlm_short(decoded)
+		self.assertIn("317@", line)
+		self.assertIn("536@", line)
+
 
 if __name__ == "__main__":
 	unittest.main()

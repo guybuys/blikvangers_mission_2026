@@ -23,14 +23,17 @@ Frame-layout (little-endian, exact 60 bytes):
    32      2   i16    gz_dps_x10
    34      1   u8     cal_pack              2b sys|gy|ac|mg  altijd geldig*
    35      1   u8     tag_count             0..2
-   36      9   ...    tag[0]                BhhhH            id+dx+dy+dz+sz
-   45      9   ...    tag[1]                BhhhH
-   54      6   bytes  reserved              0xFF*6           toekomst (GPS/bat)
+   36     10   ...    tag[0]                HhhhH            id+dx+dy+dz+sz
+   46     10   ...    tag[1]                HhhhH
+   56      4   bytes  reserved              0xFF*4           toekomst (GPS/bat)
                                                               = 60 bytes
 
 Sentinels voor "ontbrekend":
   i16:  -32768 (0x8000)        u16: 65535 (0xFFFF)
-  u8:   0xFF (tag_id)
+  u8:   0xFF (cal/count)
+  u16:  0xFFFF (tag_id) — nodig om alle 587 tag36h11 IDs (0..586) te
+        kunnen rapporteren; vroeger was tag_id 1 byte wat de IDs 317
+        en 536 op het missie-veld onleesbaar maakte (& 0xFF -> 61/24).
 
 (*) cal_pack heeft géén sentinel: alle 4 velden zijn 0..3 en de packing
     (s<<6)|(g<<4)|(a<<2)|m kan elke byte 0x00..0xFF produceren. "Geen
@@ -110,7 +113,10 @@ def state_value_for_name(name: str) -> Optional[int]:
 INT16_NA = -0x8000  # -32768
 UINT16_NA = 0xFFFF  # 65535
 UINT8_NA = 0xFF
-TAG_ID_NA = 0xFF
+# tag_id is u16 in het frame zodat IDs > 255 (tag36h11 gaat tot 586)
+# zonder bit-loss kunnen worden gerapporteerd. ``0xFFFF`` markeert een
+# "lege" tag-slot in een frame met tag_count < NUM_TAGS.
+TAG_ID_NA = 0xFFFF
 
 # --- Schaalfactoren (waarde * factor -> integer dat we packen) ----------------
 SCALE_ALT_CM = 100.0  # 1.23 m -> 123 cm
@@ -122,8 +128,12 @@ SCALE_GYRO_X10 = 10.0  # 12.3 °/s -> 123
 
 # --- Tags ---------------------------------------------------------------------
 NUM_TAGS = 2
-_TAG_FORMAT = "BhhhH"  # id(1) + dx(2) + dy(2) + dz(2) + size(2) = 9 B
-_RESERVED_BYTES = 6
+# id(2) + dx(2) + dy(2) + dz(2) + size(2) = 10 B. Was vroeger BhhhH (9 B)
+# maar dat masketeerde tag_id op 1 byte; missie-tags 317/536 kwamen er
+# als 61/24 uit. We "betalen" 2 B uit het reserved-blok (6 → 4) zodat
+# de totale frame-size netjes 60 B blijft (radio MTU).
+_TAG_FORMAT = "HhhhH"
+_RESERVED_BYTES = 4
 
 # Volledige frame layout. Match dit EXACT op de Pico-decoder
 # (``pico_files/Orginele cansat/RadioReceiver/tlm_decode.py``).
@@ -403,9 +413,12 @@ def pack_tlm(
 	for i in range(NUM_TAGS):
 		if i < len(tags_use):
 			t = tags_use[i]
+			# Clamp tag_id op 0..0xFFFE: 0xFFFF is gereserveerd als
+			# TAG_ID_NA. Voor apriltag-families die boven 65534 komen
+			# zou je dit moeten heroverwegen, maar tag36h11 gaat tot 586.
 			values.extend(
 				[
-					int(t.tag_id) & 0xFF,
+					max(0, min(0xFFFE, int(t.tag_id))),
 					max(-0x8000, min(0x7FFF, int(t.dx_cm))),
 					max(-0x8000, min(0x7FFF, int(t.dy_cm))),
 					max(-0x8000, min(0x7FFF, int(t.dz_cm))),

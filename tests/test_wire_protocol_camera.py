@@ -147,6 +147,29 @@ class CamShootTests(unittest.TestCase):
 		self.assertEqual(svc.detects, 1)
 		self.assertEqual(svc.shoots, 0)
 
+	def test_cam_detect_reports_full_tag_id_above_255(self) -> None:
+		"""Regressie: ID's > 255 mogen niet meer door ``& 0xFF`` worden
+		afgekapt in de wire-reply. Vroeger werd 317 → 61 en 536 → 24
+		(beide zijn echte missie-tags op het terrein in 2026), wat de
+		operator een verkeerde tag-ID liet zien.
+		"""
+		svc = FakeServices(
+			shoot_result=ShootResult(path=None, detections=[], image_wh=(1600, 1300)),
+			detect_result=(
+				[
+					_make_metric(317, 5.00, 300.0),
+					_make_metric(536, 7.50, 200.0),
+				],
+				(1600, 1300),
+			),
+		)
+		out = self._call("CAM DETECT", services=svc, thread=FakeThread(active=False))
+		self.assertIn(b"317=500", out)
+		self.assertIn(b"536=750", out)
+		self.assertNotIn(b"61=", out)  # 317 & 0xFF
+		self.assertNotIn(b"24=", out)  # 536 & 0xFF
+		self.assertLessEqual(len(out), 60)
+
 	def test_cam_shoot_blocked_when_thread_active(self) -> None:
 		svc = FakeServices(
 			shoot_result=ShootResult(path=None, detections=[], image_wh=(1600, 1300)),

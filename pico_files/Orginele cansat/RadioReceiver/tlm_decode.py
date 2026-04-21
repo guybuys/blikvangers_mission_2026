@@ -41,7 +41,9 @@ STATE_NAMES = {
 # --- Sentinels ----------------------------------------------------------------
 INT16_NA = -0x8000
 UINT16_NA = 0xFFFF
-TAG_ID_NA = 0xFF
+# tag_id is u16 in het frame zodat IDs > 255 (tag36h11 gaat tot 586,
+# bv. de missie-tags 317 en 536) zonder bit-loss kunnen worden gedecodeerd.
+TAG_ID_NA = 0xFFFF
 
 # --- Schaalfactoren -----------------------------------------------------------
 SCALE_ALT_CM = 100.0
@@ -52,8 +54,11 @@ SCALE_ACCEL_MG = 1000.0
 SCALE_GYRO_X10 = 10.0
 
 NUM_TAGS = 2
-_TAG_FORMAT = "BhhhH"
-_RESERVED_BYTES = 6
+# id(2) + dx(2) + dy(2) + dz(2) + size(2) = 10 B per tag. Reserved
+# slinkt van 6 → 4 zodat het frame 60 B blijft. Zie Zero-codec voor
+# achtergrond.
+_TAG_FORMAT = "HhhhH"
+_RESERVED_BYTES = 4
 
 # Volledige frame layout — moet EXACT matchen met de Zero-codec.
 FRAME_FORMAT = (

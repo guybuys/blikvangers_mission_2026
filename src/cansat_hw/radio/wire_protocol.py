@@ -1086,7 +1086,10 @@ def _format_tag_list(detections: List[Any], *, top_n: int = 2) -> str:
 	)[: max(1, int(top_n))]
 	parts = []
 	for m in ordered:
-		tid = int(getattr(m, "tag_id", 0)) & 0xFF
+		# Geen & 0xFF: tag_id wordt nu volledig gerapporteerd (0..0xFFFE).
+		# Met 4-digit IDs + max top_n=2 + 4-digit cm blijft de regel ruim
+		# binnen de 60-B payload (worst case "OK SHOOT … T=2 9999=9999 9999=9999").
+		tid = int(getattr(m, "tag_id", 0))
 		d_cm = int(round(float(getattr(m, "distance_m", 0.0)) * 100.0))
 		parts.append("%d=%d" % (tid, d_cm))
 	return " ".join(parts)

@@ -314,6 +314,36 @@ class PackUnpackRoundTripTest(unittest.TestCase):
 		self.assertEqual(f.tags[1].tag_id, 2)
 		self.assertEqual(f.tags[1].dx_cm, -50)
 
+	def test_tag_ids_above_255_round_trip_unchanged(self) -> None:
+		"""Regressie: vroeger packte de codec ``tag_id & 0xFF`` (1 byte), dus
+		IDs > 255 verloren bits (bv. 317 → 61, 536 → 24). De missie 2026
+		gebruikt tag36h11-IDs 85, 235, 317 en 536 op het terrein; die moeten
+		bit-perfect door de TLM-codec.
+		"""
+		from cansat_hw.telemetry.codec import (
+			MODE_MISSION,
+			STATE_DEPLOYED,
+			TagDetection,
+			pack_tlm,
+			unpack_tlm,
+		)
+
+		raw = pack_tlm(
+			mode=MODE_MISSION,
+			state=STATE_DEPLOYED,
+			seq=42,
+			utc_seconds=0,
+			utc_ms=0,
+			tags=[
+				TagDetection(tag_id=317, dx_cm=10, dy_cm=-5, dz_cm=400, size_mm=1100),
+				TagDetection(tag_id=536, dx_cm=-3, dy_cm=2, dz_cm=600, size_mm=1100),
+			],
+		)
+		f = unpack_tlm(raw)
+		self.assertEqual(len(f.tags), 2)
+		self.assertEqual(f.tags[0].tag_id, 317)
+		self.assertEqual(f.tags[1].tag_id, 536)
+
 	def test_extra_tags_are_truncated_silently(self) -> None:
 		from cansat_hw.telemetry.codec import (
 			MODE_MISSION,
