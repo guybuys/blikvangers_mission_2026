@@ -54,13 +54,29 @@ DEFAULT_BIG_STEP_US = 50
 
 @dataclass
 class ServoCal:
-	"""Calibratie van één servo (alle waardes in microseconden, BCM-gpio)."""
+	"""Calibratie van één servo (alle waardes in microseconden, BCM-gpio).
+
+	``axis`` en ``invert`` documenteren de **mechanische rol** van deze servo
+	in de gimbal en worden door :func:`gimbal_axis_mapping` gelezen om de
+	control-loop autonoom te configureren. Beiden zijn optioneel zodat oude
+	calibraties (zonder deze velden) blijven werken — :func:`gimbal_axis_mapping`
+	valt dan terug op het historische gedrag (servo1→X, servo2→Y, geen invert).
+	"""
 
 	gpio: int
 	min_us: Optional[int] = None
 	center_us: Optional[int] = None
 	max_us: Optional[int] = None
 	stow_us: Optional[int] = None  # Fase 12: bekende veilige park-positie.
+	# Fase 9-tuning: welke control-as compenseert deze servo, en moet het
+	# teken van de correctie omgekeerd worden? Bijhouden in de cal i.p.v.
+	# in CLI-flags zodat een fysieke remontage (sensor 90° gedraaid, of
+	# linker/rechter servo verwisseld) één bestand om te flippen vereist
+	# i.p.v. elk script en elke service-unit. ``axis`` accepteert
+	# ``"x"`` of ``"y"`` (case-insensitive); ``None`` = "niet gezet, gebruik
+	# defaults".
+	axis: Optional[str] = None
+	invert: bool = False
 
 	def is_complete(self) -> bool:
 		"""``True`` als alle limieten + center én stow gezet zijn."""
@@ -98,6 +114,18 @@ def _load_cal_dict(path: Path) -> Dict[int, ServoCal]:
 			v = val.get(field_name)
 			if isinstance(v, int):
 				setattr(cal, field_name, v)
+		# axis: alleen "x"/"y" (case-insensitive). Onbekende waarden negeren
+		# we stilletjes — de loop valt dan terug op defaults via
+		# :func:`gimbal_axis_mapping`. Zo breekt een typo in de JSON niet
+		# de hele bootstrap (welke we wel doen voor required gpio/limits).
+		axis_v = val.get("axis")
+		if isinstance(axis_v, str):
+			s = axis_v.strip().lower()
+			if s in ("x", "y"):
+				cal.axis = s
+		invert_v = val.get("invert")
+		if isinstance(invert_v, bool):
+			cal.invert = invert_v
 		out[idx] = cal
 	return out
 
@@ -109,13 +137,21 @@ def _save_cal_dict(path: Path, cal: Dict[int, ServoCal]) -> None:
 		c = cal.get(idx)
 		if c is None:
 			continue
-		data[key] = {
+		entry: Dict[str, Any] = {
 			"gpio": int(c.gpio),
 			"min_us": c.min_us,
 			"center_us": c.center_us,
 			"max_us": c.max_us,
 			"stow_us": c.stow_us,
 		}
+		# axis/invert alleen meeschrijven als ze expliciet gezet zijn — zo
+		# blijven oude calibraties (zonder deze velden) na een save-roundtrip
+		# minimaal en hoeven we geen "ja, dit is de default"-velden te tonen.
+		if c.axis is not None:
+			entry["axis"] = str(c.axis)
+		if c.invert:
+			entry["invert"] = True
+		data[key] = entry
 	data["saved_at"] = int(time.time())
 	path.parent.mkdir(parents=True, exist_ok=True)
 	tmp = path.with_suffix(path.suffix + ".tmp")

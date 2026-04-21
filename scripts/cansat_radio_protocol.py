@@ -286,27 +286,47 @@ def main() -> int:
 	p.add_argument(
 		"--gimbal-kx",
 		type=float,
-		default=200.0,
-		help="P-gain servo1 / gx-fout (µs per m/s²). Zelfde tuning-conventie "
+		default=100.0,
+		help="P-gain X-as / gx-fout (µs per m/s²). Zelfde tuning-conventie "
 		"als scripts/gimbal_level.py; hoger = harder sturen (oscillatie-risico).",
 	)
 	p.add_argument(
 		"--gimbal-ky",
 		type=float,
-		default=200.0,
-		help="P-gain servo2 / gy-fout (µs per m/s²).",
+		default=100.0,
+		help="P-gain Y-as / gy-fout (µs per m/s²).",
 	)
 	p.add_argument(
 		"--gimbal-kix",
 		type=float,
-		default=20.0,
-		help="I-gain servo1 / gx-fout (µs per geïntegreerde fout·s). 0 = uit.",
+		default=15.0,
+		help="I-gain X-as / gx-fout (µs per geïntegreerde fout·s). 0 = uit.",
 	)
 	p.add_argument(
 		"--gimbal-kiy",
 		type=float,
-		default=20.0,
-		help="I-gain servo2 / gy-fout (idem).",
+		default=15.0,
+		help="I-gain Y-as / gy-fout (idem).",
+	)
+	p.add_argument(
+		"--gimbal-deadband-x",
+		type=float,
+		default=0.18,
+		help="P-deadband op X-fout (m/s²). Onder deze drempel = geen P-correctie "
+		"(I blijft integreren). Default 0.18 (slinger-test april 2026).",
+	)
+	p.add_argument(
+		"--gimbal-deadband-y",
+		type=float,
+		default=0.18,
+		help="P-deadband op Y-fout (m/s²); zie --gimbal-deadband-x.",
+	)
+	p.add_argument(
+		"--gimbal-alpha",
+		type=float,
+		default=0.90,
+		help="LPF-factor voor de zwaartekrachtvector (fg = α·fg + (1-α)·g). "
+		"Hoger = sterker filter = minder ruis maar tragere respons.",
 	)
 	p.add_argument(
 		"--gimbal-max-us-step",
@@ -318,8 +338,9 @@ def main() -> int:
 	p.add_argument(
 		"--gimbal-swap-axes",
 		action="store_true",
-		help="Ruil de gx→servo1 / gy→servo2 mapping om. Gebruik als de gimbal "
-		"in de verkeerde as corrigeert (makkelijker dan JSON-calibratie herschrijven).",
+		help="Ruil de X→servo1 / Y→servo2 mapping om. Legacy override; nieuwe "
+		"hardware-mapping hoort in ``axis``-veld van servo_calibration.json. "
+		"Wanneer gezet wint deze flag van de cal-mapping.",
 	)
 	p.add_argument(
 		"--no-camera",
@@ -527,6 +548,7 @@ def main() -> int:
 		ServoController,
 		action_for_shutdown,
 		action_for_transition,
+		gimbal_axis_mapping,
 		make_pigpio_driver,
 	)
 	from cansat_hw.telemetry import LogManager, state_name
@@ -630,6 +652,15 @@ def main() -> int:
 			and cal1.center_us is not None
 			and cal2.center_us is not None
 		):
+			# Axis-mapping uit de cal afleiden. ``--gimbal-swap-axes`` blijft
+			# een legacy override zodat een operator zonder write-access tot
+			# de cal nog steeds kan flippen via een service-arg. Onbekende
+			# axis-velden ⇒ defaults (servo1=X, servo2=Y) met een log-warn.
+			mapping = gimbal_axis_mapping(cal1, cal2)
+			ax_x = mapping.axis_x_servo
+			ax_y = mapping.axis_y_servo
+			if args.gimbal_swap_axes:
+				ax_x, ax_y = ax_y, ax_x
 			gimbal_loop = GimbalLoop(
 				cal1=cal1,
 				cal2=cal2,
@@ -637,20 +668,37 @@ def main() -> int:
 				ky=float(args.gimbal_ky),
 				kix=float(args.gimbal_kix),
 				kiy=float(args.gimbal_kiy),
+				alpha=float(args.gimbal_alpha),
+				deadband_x=float(args.gimbal_deadband_x),
+				deadband_y=float(args.gimbal_deadband_y),
 				max_us_step=int(args.gimbal_max_us_step),
-				swap_control_axes=bool(args.gimbal_swap_axes),
+				axis_x_servo=ax_x,
+				axis_y_servo=ax_y,
+				invert_x=mapping.invert_x,
+				invert_y=mapping.invert_y,
 			)
 			if args.gimbal_auto_enable:
 				gimbal_loop.enable()
+			if mapping.derived_from_default:
+				print(
+					"WARN: gimbal axis-mapping niet gezet in servo_calibration.json — "
+					"defaults (X→servo1, Y→servo2). Schrijf 'axis': 'x'/'y' per servo "
+					"om dit expliciet te maken.",
+					file=sys.stderr,
+				)
 			print(
 				"Gimbal-loop beschikbaar — kx=%.1f ky=%.1f kix=%.1f kiy=%.1f "
-				"step=%d µs/tick (%s)"
+				"step=%d µs/tick X→servo%d%s Y→servo%d%s (%s)"
 				% (
 					float(args.gimbal_kx),
 					float(args.gimbal_ky),
 					float(args.gimbal_kix),
 					float(args.gimbal_kiy),
 					int(args.gimbal_max_us_step),
+					ax_x,
+					" inv" if mapping.invert_x else "",
+					ax_y,
+					" inv" if mapping.invert_y else "",
 					"auto-on" if args.gimbal_auto_enable else "off — !gimbal on om te activeren",
 				)
 			)

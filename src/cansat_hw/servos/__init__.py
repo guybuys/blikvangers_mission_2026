@@ -9,7 +9,12 @@ from cansat_hw.servos.controller import (
 	TUNING_WATCHDOG_S,
 	make_pigpio_driver,
 )
-from cansat_hw.servos.gimbal_loop import GimbalLoop, GimbalStatus
+from cansat_hw.servos.gimbal_loop import (
+	AxisMapping,
+	GimbalLoop,
+	GimbalStatus,
+	gimbal_axis_mapping,
+)
 from cansat_hw.servos.power_enable import servo_rail_configure, servo_rail_set
 from cansat_hw.servos.state_policy import (
 	ServoAction,
@@ -18,6 +23,7 @@ from cansat_hw.servos.state_policy import (
 )
 
 __all__ = [
+	"AxisMapping",
 	"FakeRailDriver",
 	"GimbalLoop",
 	"GimbalStatus",
@@ -29,6 +35,7 @@ __all__ = [
 	"TUNING_WATCHDOG_S",
 	"action_for_shutdown",
 	"action_for_transition",
+	"gimbal_axis_mapping",
 	"make_pigpio_driver",
 	"servo_rail_configure",
 	"servo_rail_set",

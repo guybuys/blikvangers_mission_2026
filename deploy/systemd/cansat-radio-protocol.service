@@ -10,39 +10,79 @@
 #   - SPI aan; venv met pip install -e ".[rpi,sensors,gimbal]" (.[rpi] is verplicht
 #     voor SPI/RFM69; .[sensors] voor BME280/BNO055; .[gimbal] voor servo's)
 #   - Timezone (bv. Brussel): sudo timedatectl set-timezone Europe/Brussels
-#   - SET TIME over de radio: dit service draait als **root** zodat de klok gezet kan worden
-#     (clock_settime). Zonder root: timedatectl + sudoers, of weiger SET TIME (ERR TIME).
+#   - pigpiod als systemd-service (``sudo systemctl enable --now pigpiod``);
+#     wij praten via de socket (geen root nodig in deze service).
+#   - User ``icw`` zit in groepen ``spi i2c gpio video dialout`` zodat de
+#     hardware bereikbaar is zonder ``User=root``. Zie SETUP-blok onderaan.
+#   - SET TIME over de radio: ``CAP_SYS_TIME`` capability staat aan zodat
+#     ``clock_settime`` werkt zonder dat de hele service root hoeft te zijn.
 #
 # Stoppen: STOP RADIO vanaf de Pico, of: sudo systemctl stop cansat-radio-protocol.service
 
 [Unit]
 Description=CanSat RFM69 wire protocol (CONFIG/MISSION listener)
-After=network-pre.target local-fs.target
+After=network-pre.target local-fs.target pigpiod.service
 Wants=network-pre.target
+# pigpiod hoort up te zijn als wij starten — anders faalt de servo-init
+# (Python pigpio kan niet connecten op localhost:8888). Want= zodat we
+# ook starten als pigpiod (om wat voor reden ook) niet beschikbaar is.
+Wants=pigpiod.service
 
 [Service]
 Type=simple
-User=root
-Group=root
+# Sinds april 2026: service draait als ``icw`` zodat alle config-files
+# (servo_calibration.json, bno055_calibration.json, radio_runtime.json)
+# zonder sudo door dezelfde user editbaar zijn als die SSH'ed binnenkomt.
+# CAP_SYS_TIME bewaart de SET TIME-functionaliteit; SupplementaryGroups
+# geeft toegang tot SPI (RFM69) / I²C (BME280, BNO055) / GPIO (radio
+# IRQ-pin) / video (Picamera2) / dialout (serial, indien ooit nodig).
+User=icw
+Group=icw
+SupplementaryGroups=spi i2c gpio video dialout
+AmbientCapabilities=CAP_SYS_TIME
+CapabilityBoundingSet=CAP_SYS_TIME
 WorkingDirectory=/home/icw/cansat_mission_2026
 Environment=PYTHONUNBUFFERED=1
 Environment=GPIOZERO_PIN_FACTORY=rpigpio
-# Zorg dat de photo/log-map bestaat vóór de service start; anders faalt de
-# preflight-check ``LOG`` (de service draait als root, dus ``~/photos`` ≠
-# ``/home/icw/photos``) — we maken daarom de juiste user-map en chmod'en die.
+# Photo/log-mappen aanmaken vóór start. Onder ``User=icw`` resolveren ze
+# nu wél naar ``/home/icw/...`` maar we houden de absolute --photo-dir /
+# --log-dir vlaggen om expliciet te zijn (en omdat ``Path.home()`` in de
+# service-context anders ``/`` zou kunnen geven). chown is technisch
+# overbodig (wij ZIJN icw) maar bevestigt het idempotent en lost legacy
+# root-owned files op die door de oude unit zijn aangemaakt.
 ExecStartPre=/bin/mkdir -p /home/icw/photos
-ExecStartPre=/bin/chown icw:icw /home/icw/photos
-# Idem voor de binary log-map (cansat_continuous.bin + per-sessie *.bin).
-# Zonder dit zou Path.home() onder root resolveren naar /root/cansat_logs/
-# en zou icw die files niet zonder sudo kunnen lezen.
 ExecStartPre=/bin/mkdir -p /home/icw/cansat_logs
-ExecStartPre=/bin/chown icw:icw /home/icw/cansat_logs
 # Pas --freq / --node / --dest / pins aan jullie hardware aan.
 # --freq is enkel fallback: zodra de Pico ``SET FREQ`` heeft gedaan, staat
 # ``config/radio_runtime.json`` op beide kanten in sync.
-ExecStart=/home/icw/cansat_mission_2026/.venv/bin/python scripts/cansat_radio_protocol.py --verbose --poll 1.0 --reply-delay 0.08 --photo-dir /home/icw/photos --log-dir /home/icw/cansat_logs --bme280-addr 0x77
+ExecStart=/home/icw/cansat_mission_2026/.venv/bin/python scripts/cansat_radio_protocol.py --verbose --poll 1.0 --reply-delay 0.08 --photo-dir /home/icw/photos --log-dir /home/icw/cansat_logs --bme280-addr 0x77 --camera-resolution 1600x1300
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+
+# --- SETUP (één keer per Zero) ----------------------------------------------
+#
+# 1. Zorg dat ``icw`` in alle hardware-groepen zit:
+#       sudo usermod -aG spi,i2c,gpio,video,dialout icw
+#       # → opnieuw inloggen of: ``newgrp spi`` etc.
+#
+# 2. pigpiod als persistente service:
+#       sudo systemctl enable --now pigpiod
+#
+# 3. Bestaande root-owned config terug naar icw (eenmalig, voor de cal-files
+#    die de oude root-service heeft geschreven):
+#       sudo chown -R icw:icw /home/icw/cansat_mission_2026/config
+#       sudo chown -R icw:icw /home/icw/cansat_logs /home/icw/photos
+#
+# 4. Nieuwe unit-file installeren + reload + restart:
+#       sudo cp deploy/systemd/cansat-radio-protocol.service /etc/systemd/system/
+#       sudo systemctl daemon-reload
+#       sudo systemctl restart cansat-radio-protocol.service
+#       sudo systemctl status  cansat-radio-protocol.service   # bevestig: User=icw
+#
+# 5. Sanity-check vanaf SSH:
+#       ls -l config/gimbal/servo_calibration.json   # → icw icw
+#       journalctl -u cansat-radio-protocol -n 30 -f
+# ----------------------------------------------------------------------------

@@ -17,7 +17,7 @@ import math
 import unittest
 
 from cansat_hw.servos.controller import ServoCal
-from cansat_hw.servos.gimbal_loop import GimbalLoop
+from cansat_hw.servos.gimbal_loop import GimbalLoop, gimbal_axis_mapping
 
 
 def _cal1() -> ServoCal:
@@ -224,6 +224,240 @@ class GimbalLoopLifecycleTest(unittest.TestCase):
 		assert st.last_gx is not None
 		self.assertAlmostEqual(st.last_gx, 0.0, places=6)
 		self.assertAlmostEqual(math.sqrt((st.last_gz or 0.0) ** 2), 9.81, places=4)
+
+
+class GimbalAxisMappingTest(unittest.TestCase):
+	"""``gimbal_axis_mapping`` + GimbalLoop met expliciete axis-velden.
+
+	De gevalideerde RPITSM0-hardware (april 2026) heeft servo1 op de Y-as en
+	servo2 op de X-as — historisch bouwde ``--swap-control-axes`` dat. Deze
+	tests pinnen vast dat de cal-driven mapping precies hetzelfde gedrag
+	produceert, en dat alle 4 combinaties (axes × invert) kloppen.
+	"""
+
+	def test_default_no_axis_falls_back_to_servo1_x(self) -> None:
+		c1 = _cal1()  # axis None
+		c2 = _cal2()  # axis None
+		m = gimbal_axis_mapping(c1, c2)
+		self.assertEqual(m.axis_x_servo, 1)
+		self.assertEqual(m.axis_y_servo, 2)
+		self.assertFalse(m.invert_x)
+		self.assertFalse(m.invert_y)
+		self.assertTrue(m.derived_from_default)
+
+	def test_servo1_y_servo2_x_routes_correctly(self) -> None:
+		# Match RPITSM0-mapping: servo1=Y, servo2=X.
+		c1 = _cal1()
+		c1.axis = "y"
+		c2 = _cal2()
+		c2.axis = "x"
+		m = gimbal_axis_mapping(c1, c2)
+		self.assertEqual(m.axis_x_servo, 2)
+		self.assertEqual(m.axis_y_servo, 1)
+		self.assertFalse(m.derived_from_default)
+
+	def test_same_axis_falls_back_to_default(self) -> None:
+		c1 = _cal1()
+		c1.axis = "x"
+		c2 = _cal2()
+		c2.axis = "x"  # collision
+		m = gimbal_axis_mapping(c1, c2)
+		self.assertTrue(m.derived_from_default)
+		self.assertEqual(m.axis_x_servo, 1)
+		self.assertEqual(m.axis_y_servo, 2)
+
+	def test_invert_propagates_per_axis(self) -> None:
+		c1 = _cal1()
+		c1.axis = "x"
+		c1.invert = True
+		c2 = _cal2()
+		c2.axis = "y"
+		c2.invert = False
+		m = gimbal_axis_mapping(c1, c2)
+		self.assertEqual(m.axis_x_servo, 1)
+		self.assertTrue(m.invert_x)
+		self.assertFalse(m.invert_y)
+
+	def test_axis_x_servo_must_differ_from_axis_y_servo(self) -> None:
+		with self.assertRaises(ValueError):
+			GimbalLoop(cal1=_cal1(), cal2=_cal2(), axis_x_servo=1, axis_y_servo=1)
+
+	def test_axis_servo_must_be_1_or_2(self) -> None:
+		with self.assertRaises(ValueError):
+			GimbalLoop(cal1=_cal1(), cal2=_cal2(), axis_x_servo=3, axis_y_servo=2)
+
+	def test_explicit_mapping_routes_x_to_servo2(self) -> None:
+		# X→servo2 (RPITSM0), Y→servo1. Positieve gx moet servo2 omlaag duwen.
+		loop = GimbalLoop(
+			cal1=_cal1(),
+			cal2=_cal2(),
+			alpha=0.0,
+			kix=0.0,
+			kiy=0.0,
+			deadband_x=0.0,
+			deadband_y=0.0,
+			max_us_step=200,  # rate-limit niet bindend
+			axis_x_servo=2,
+			axis_y_servo=1,
+		)
+		loop.enable()
+		out = loop.tick((1.0, 0.0, 9.5))
+		assert out is not None
+		us1, us2 = out
+		# Servo1 krijgt geen X-correctie → blijft op center.
+		self.assertEqual(us1, 1500)
+		# Servo2 krijgt -kx*ex = -100 → 1600 - 100 = 1500.
+		self.assertEqual(us2, 1500)
+
+	def test_explicit_mapping_routes_y_to_servo1(self) -> None:
+		# RPITSM0: servo1 voelt Y. Positieve gy → servo1 omlaag, servo2 ongemoeid.
+		loop = GimbalLoop(
+			cal1=_cal1(),
+			cal2=_cal2(),
+			alpha=0.0,
+			kix=0.0,
+			kiy=0.0,
+			deadband_x=0.0,
+			deadband_y=0.0,
+			max_us_step=200,
+			axis_x_servo=2,
+			axis_y_servo=1,
+		)
+		loop.enable()
+		out = loop.tick((0.0, 1.0, 9.5))
+		assert out is not None
+		us1, us2 = out
+		# Servo1 krijgt -ky*ey = -100 → 1500 - 100 = 1400.
+		self.assertEqual(us1, 1400)
+		self.assertEqual(us2, 1600)
+
+	def test_invert_x_flips_correction_sign(self) -> None:
+		# Met invert_x: positieve gx → servo (X-as) omhoog i.p.v. omlaag.
+		loop = GimbalLoop(
+			cal1=_cal1(),
+			cal2=_cal2(),
+			alpha=0.0,
+			kix=0.0,
+			kiy=0.0,
+			deadband_x=0.0,
+			deadband_y=0.0,
+			max_us_step=200,
+			invert_x=True,
+		)
+		loop.enable()
+		out = loop.tick((1.0, 0.0, 9.5))
+		assert out is not None
+		us1, _ = out
+		# corr_x = -kx*1 = -100; invert → +100 → us1 = 1500 + 100 = 1600.
+		self.assertEqual(us1, 1600)
+
+	def test_swap_axes_legacy_flag_swaps_servo_assignment(self) -> None:
+		# swap_control_axes=True ruilt axis_x_servo en axis_y_servo. Met de
+		# defaults (1, 2) wordt dit (2, 1) — equivalent met expliciete RPITSM0
+		# mapping. Invert-flags blijven aan hun as hangen.
+		loop_swap = GimbalLoop(
+			cal1=_cal1(),
+			cal2=_cal2(),
+			alpha=0.0,
+			kix=0.0,
+			kiy=0.0,
+			deadband_x=0.0,
+			deadband_y=0.0,
+			max_us_step=200,
+			swap_control_axes=True,
+		)
+		loop_explicit = GimbalLoop(
+			cal1=_cal1(),
+			cal2=_cal2(),
+			alpha=0.0,
+			kix=0.0,
+			kiy=0.0,
+			deadband_x=0.0,
+			deadband_y=0.0,
+			max_us_step=200,
+			axis_x_servo=2,
+			axis_y_servo=1,
+		)
+		loop_swap.enable()
+		loop_explicit.enable()
+		# Zelfde input → zelfde output ⇒ legacy flag is equivalent.
+		out_a = loop_swap.tick((0.5, -0.3, 9.7))
+		out_b = loop_explicit.tick((0.5, -0.3, 9.7))
+		self.assertEqual(out_a, out_b)
+
+
+class ServoCalAxisFieldTest(unittest.TestCase):
+	"""Schema-roundtrip: ``ServoCal.axis``/``invert`` worden gelezen + geschreven."""
+
+	def test_axis_default_is_none(self) -> None:
+		c = ServoCal(gpio=13)
+		self.assertIsNone(c.axis)
+		self.assertFalse(c.invert)
+
+	def test_load_save_roundtrip_preserves_axis_invert(self) -> None:
+		import json
+		import tempfile
+		from pathlib import Path
+
+		from cansat_hw.servos.controller import _load_cal_dict, _save_cal_dict
+
+		with tempfile.TemporaryDirectory() as td:
+			path = Path(td) / "cal.json"
+			cal = {
+				1: ServoCal(
+					gpio=13,
+					min_us=1000,
+					center_us=1500,
+					max_us=2000,
+					stow_us=1100,
+					axis="y",
+					invert=True,
+				),
+				2: ServoCal(
+					gpio=12,
+					min_us=1100,
+					center_us=1600,
+					max_us=2100,
+					stow_us=2000,
+					axis="x",
+					invert=False,
+				),
+			}
+			_save_cal_dict(path, cal)
+			# Reload van disk en check semantiek.
+			loaded = _load_cal_dict(path)
+			self.assertEqual(loaded[1].axis, "y")
+			self.assertTrue(loaded[1].invert)
+			self.assertEqual(loaded[2].axis, "x")
+			self.assertFalse(loaded[2].invert)
+			# JSON minimaal: invert=False NIET in entry voor servo2.
+			raw = json.loads(path.read_text(encoding="utf-8"))
+			self.assertNotIn("invert", raw["servo2"])
+			self.assertEqual(raw["servo2"]["axis"], "x")
+			self.assertTrue(raw["servo1"]["invert"])
+
+	def test_load_ignores_invalid_axis_value(self) -> None:
+		import json
+		import tempfile
+		from pathlib import Path
+
+		from cansat_hw.servos.controller import _load_cal_dict
+
+		with tempfile.TemporaryDirectory() as td:
+			path = Path(td) / "cal.json"
+			path.write_text(
+				json.dumps(
+					{
+						"servo1": {"gpio": 13, "axis": "z", "invert": "nope"},
+						"servo2": {"gpio": 12, "axis": "Y"},
+					}
+				),
+				encoding="utf-8",
+			)
+			loaded = _load_cal_dict(path)
+			self.assertIsNone(loaded[1].axis)
+			self.assertFalse(loaded[1].invert)
+			self.assertEqual(loaded[2].axis, "y")  # case-insensitief geaccepteerd
 
 
 if __name__ == "__main__":

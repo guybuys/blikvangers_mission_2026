@@ -60,6 +60,12 @@ class ServoCal:
 	min_us: int
 	center_us: int
 	max_us: int
+	# Per-as compensatie: welke control-as deze servo regelt en of het teken
+	# omgekeerd moet. Mappen op :class:`cansat_hw.servos.controller.ServoCal`
+	# zodat één file (config/gimbal/servo_calibration.json) zowel de
+	# radio-service als deze CLI configureert.
+	axis: Optional[str] = None
+	invert: bool = False
 
 	def clamp(self, us: float) -> int:
 		return int(max(self.min_us, min(self.max_us, round(us))))
@@ -73,14 +79,40 @@ def _load_servo_cal(path: Path) -> Tuple[ServoCal, ServoCal]:
 		missing = [k for k in ("gpio", "min_us", "center_us", "max_us") if d.get(k) is None]
 		if missing:
 			raise ValueError(f"Missing {missing} in {path} for {key}")
+		axis_raw = d.get("axis")
+		axis: Optional[str] = None
+		if isinstance(axis_raw, str):
+			s = axis_raw.strip().lower()
+			if s in ("x", "y"):
+				axis = s
+		invert = bool(d.get("invert", False))
 		return ServoCal(
 			gpio=int(d["gpio"]),
 			min_us=int(d["min_us"]),
 			center_us=int(d["center_us"]),
 			max_us=int(d["max_us"]),
+			axis=axis,
+			invert=invert,
 		)
 
 	return parse("servo1"), parse("servo2")
+
+
+def _derive_axis_mapping(s1: ServoCal, s2: ServoCal) -> Tuple[int, int, bool, bool, bool]:
+	"""Bouw ``(axis_x_servo, axis_y_servo, invert_x, invert_y, from_default)``.
+
+	Spiegelt :func:`cansat_hw.servos.gimbal_loop.gimbal_axis_mapping` zodat de
+	CLI niet hoeft te importeren uit het servo-package (geen pigpio-cycle).
+	Beide servo's moeten verschillende ``axis``-velden hebben; anders fall-back
+	op het historische ``servo1=X, servo2=Y, invert=False`` (CLI logt dat).
+	"""
+	a1 = (s1.axis or "").strip().lower() if s1.axis else ""
+	a2 = (s2.axis or "").strip().lower() if s2.axis else ""
+	if a1 in ("x", "y") and a2 in ("x", "y") and a1 != a2:
+		if a1 == "x":
+			return (1, 2, bool(s1.invert), bool(s2.invert), False)
+		return (2, 1, bool(s2.invert), bool(s1.invert), False)
+	return (1, 2, False, False, True)
 
 
 def _gravity_to_angles(g: Tuple[float, float, float]) -> Tuple[float, float]:
@@ -170,28 +202,35 @@ def main() -> int:
 	parser.add_argument("--rate-hz", type=float, default=50.0)
 	parser.add_argument("--log-hz", type=float, default=5.0)
 	parser.add_argument("--log", type=Path, default=Path("gimbal_level_log.csv"))
+	# Defaults uit de gevalideerde slinger-test (april 2026, RPITSM0). Zie
+	# ``GimbalLoop`` field-defaults voor de runtime-equivalenten in de radio-
+	# service. ``--max-us-step`` is voor 50 Hz (1/--rate-hz); de service
+	# tikt op 5 Hz en zet daar zelf een hogere waarde.
 	parser.add_argument(
 		"--kx",
 		type=float,
-		default=200.0,
-		help="P-versterking servo1 / gx-fout: Δµs ≈ −kx×fout (m/s²). Verhogen = harder sturen (let op oscillatie).",
+		default=100.0,
+		help="P-versterking X-as / gx-fout: Δµs ≈ −kx×fout (m/s²). Verhogen "
+		"= harder sturen (let op oscillatie). Default 100 (april 2026).",
 	)
 	parser.add_argument(
 		"--ky",
 		type=float,
-		default=200.0,
-		help="P-versterking servo2 / gy-fout (idem).",
+		default=100.0,
+		help="P-versterking Y-as / gy-fout (idem).",
 	)
 	parser.add_argument(
 		"--kix",
 		type=float,
-		default=20.0,
-		help="I-term op gx-fout (µs per geïntegreerde fout·s); 0=uit. Helpt restfout te slepen; bij oscillatie/windup verlagen of --integral-max aanpassen.",
+		default=15.0,
+		help="I-term op gx-fout (µs per geïntegreerde fout·s); 0=uit. Helpt "
+		"restfout te slepen; bij oscillatie/windup verlagen of --integral-max "
+		"aanpassen. Default 15.",
 	)
 	parser.add_argument(
 		"--kiy",
 		type=float,
-		default=20.0,
+		default=15.0,
 		help="I-term op gy-fout; 0=uit.",
 	)
 	parser.add_argument(
@@ -200,14 +239,15 @@ def main() -> int:
 		default=4.0,
 		help="Anti-windup: clamp op |∫ e·dt| (zelfde eenheid als e×tijd).",
 	)
-	parser.add_argument("--alpha", type=float, default=0.85)
-	parser.add_argument("--deadband-x", type=float, default=0.10)
-	parser.add_argument("--deadband-y", type=float, default=0.10)
+	parser.add_argument("--alpha", type=float, default=0.90)
+	parser.add_argument("--deadband-x", type=float, default=0.18)
+	parser.add_argument("--deadband-y", type=float, default=0.18)
 	parser.add_argument(
 		"--max-us-step",
 		type=int,
-		default=8,
-		help="Max µs per stap naar doel-PWM. Bij hogere --kx/--ky evt. verhogen (12–16) anders traag.",
+		default=6,
+		help="Max µs per stap naar doel-PWM (per rate-hz tick). Default 6 µs "
+		"@ 50 Hz = 300 µs/s. Bij hogere --kx/--ky evt. verhogen anders traag.",
 	)
 	parser.add_argument("--g-min", type=float, default=7.0)
 	parser.add_argument("--g-max", type=float, default=12.5)
@@ -229,7 +269,22 @@ def main() -> int:
 	parser.add_argument("--enable-pin", type=int, default=6)
 	parser.add_argument("--enable-active-low", action="store_true")
 	parser.add_argument("--swap-gpio", action="store_true")
-	parser.add_argument("--swap-control-axes", action="store_true")
+	parser.add_argument(
+		"--swap-control-axes",
+		action="store_true",
+		help="Forceer ruil van X/Y → servo1/servo2 mapping (overrulet ``axis``-veld "
+		"in de calibratie). Pre-mapping legacy-flag; nieuwe code zet ``axis`` in de cal.",
+	)
+	parser.add_argument(
+		"--invert-x",
+		action="store_true",
+		help="Override: keer teken van X-correctie om (negeert ``invert`` veld in cal voor X).",
+	)
+	parser.add_argument(
+		"--invert-y",
+		action="store_true",
+		help="Override: keer teken van Y-correctie om (negeert ``invert`` veld in cal voor Y).",
+	)
 	parser.add_argument(
 		"--zero-capture-at-center",
 		action="store_true",
@@ -359,13 +414,32 @@ def main() -> int:
 					file=sys.stderr,
 				)
 
+		# Control-as mapping uit de cal afleiden + CLI-overrides toepassen.
+		ax_x_servo, ax_y_servo, inv_x, inv_y, from_default = _derive_axis_mapping(s1, s2)
+		if args.swap_control_axes:
+			ax_x_servo, ax_y_servo = ax_y_servo, ax_x_servo
+		if args.invert_x:
+			inv_x = not inv_x
+		if args.invert_y:
+			inv_y = not inv_y
+
+		print(
+			f"Axis-mapping: X→servo{ax_x_servo}{' (inv)' if inv_x else ''}, "
+			f"Y→servo{ax_y_servo}{' (inv)' if inv_y else ''}"
+			f"{' [defaults — geen axis in cal]' if from_default else ''}",
+			file=sys.stderr,
+		)
 		_remap = []
 		if args.swap_gpio:
 			_remap.append("swap-gpio")
 		if args.swap_control_axes:
 			_remap.append("swap-control-axes")
+		if args.invert_x:
+			_remap.append("invert-x")
+		if args.invert_y:
+			_remap.append("invert-y")
 		if _remap:
-			print("Remapping:", ", ".join(_remap), file=sys.stderr)
+			print("CLI-overrides:", ", ".join(_remap), file=sys.stderr)
 
 		good = 0
 		t0 = time.monotonic()
@@ -537,12 +611,29 @@ def main() -> int:
 				int_ey += ey_raw * dt
 				int_ey = max(-i_max, min(i_max, int_ey))
 
-			if args.swap_control_axes:
-				target_us1 = s1.clamp(s1.center_us + (-args.ky) * ey + (-float(args.kiy)) * int_ey)
-				target_us2 = s2.clamp(s2.center_us + (-args.kx) * ex + (-float(args.kix)) * int_ex)
+			# Bouw twee onafhankelijke as-correcties (in µs) en route ze daarna
+			# naar de juiste servo. Identieke math als ``GimbalLoop.tick()`` in
+			# src/cansat_hw/servos/gimbal_loop.py — handhaaf gelijke gedrag
+			# tussen CLI en mission-loop.
+			corr_x = (-args.kx) * ex + (-float(args.kix)) * int_ex
+			corr_y = (-args.ky) * ey + (-float(args.kiy)) * int_ey
+			if inv_x:
+				corr_x = -corr_x
+			if inv_y:
+				corr_y = -corr_y
+
+			t1 = float(s1.center_us)
+			t2 = float(s2.center_us)
+			if ax_x_servo == 1:
+				t1 += corr_x
 			else:
-				target_us1 = s1.clamp(s1.center_us + (-args.kx) * ex + (-float(args.kix)) * int_ex)
-				target_us2 = s2.clamp(s2.center_us + (-args.ky) * ey + (-float(args.kiy)) * int_ey)
+				t2 += corr_x
+			if ax_y_servo == 1:
+				t1 += corr_y
+			else:
+				t2 += corr_y
+			target_us1 = s1.clamp(t1)
+			target_us2 = s2.clamp(t2)
 
 			max_step = int(args.max_us_step)
 			if max_step > 0:

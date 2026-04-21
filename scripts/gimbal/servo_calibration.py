@@ -26,6 +26,11 @@ class ServoCalibration:
 	min_us: Optional[int] = None
 	center_us: Optional[int] = None
 	max_us: Optional[int] = None
+	# Welke control-as deze servo regelt (X of Y) en of het correctie-teken
+	# omgekeerd moet. Gelezen door de gimbal-loop in flight; CLI laat de
+	# operator dit zonder JSON-edit aanpassen via 'X', 'Y', 'i'-toetsen.
+	axis: Optional[str] = None
+	invert: bool = False
 
 	def clamp(self, us: int) -> int:
 		if self.min_us is not None:
@@ -45,6 +50,10 @@ Controls
   z                set current as MIN for selected servo
   c                set current as CENTER for selected servo
   x                set current as MAX for selected servo
+  w                set current as STOW for selected servo
+  X                tag selected servo as control-axis X
+  Y                tag selected servo as control-axis Y
+  i                toggle invert flag for selected servo (sign flip)
   p                print current state
   s                save calibration JSON
   o                turn OFF pulses for selected servo
@@ -66,9 +75,12 @@ def _status_line(
 ) -> str:
 	def fmt(i: int) -> str:
 		c = cal[i]
+		ax = c.axis or "?"
+		inv = "inv" if c.invert else "."
 		return (
 			f"S{i} gpio={c.gpio} us={current_us[i]} "
-			f"[min={c.min_us} center={c.center_us} max={c.max_us}]"
+			f"[min={c.min_us} center={c.center_us} max={c.max_us}] "
+			f"axis={ax} {inv}"
 		)
 
 	return f"selected=S{selected} | {fmt(1)} | {fmt(2)}"
@@ -143,6 +155,11 @@ def main() -> int:
 				for field in ["min_us", "center_us", "max_us"]:
 					if field in val and isinstance(val[field], int):
 						setattr(cal[idx], field, val[field])
+				axis_v = val.get("axis")
+				if isinstance(axis_v, str) and axis_v.strip().lower() in ("x", "y"):
+					cal[idx].axis = axis_v.strip().lower()
+				if isinstance(val.get("invert"), bool):
+					cal[idx].invert = bool(val["invert"])
 
 	current_us: Dict[int, int] = {
 		1: cal[1].clamp(int(args.start_us)),
@@ -202,6 +219,33 @@ def main() -> int:
 				cal[selected].max_us = current_us[selected]
 				print(_status_line(selected, current_us, cal))
 				continue
+			if cmd == "w":
+				# STOW = bekende veilige park-positie. Niet via _ServoCalibration
+				# in deze script-state (we slaan stow alleen mee bij save), dus
+				# we bewaren hem op de cal-dict via attribuut. Voor nu wijzen
+				# we hem naar een aparte slot in de cal-entry door direct in
+				# 'asdict' uitvoer te muteren bij save (onderaan).
+				setattr(cal[selected], "stow_us", current_us[selected])
+				print(_status_line(selected, current_us, cal) + f" stow={current_us[selected]}")
+				continue
+			# Axis-tagging: een capital 'X' of 'Y' betekent "geselecteerde servo
+			# regelt deze control-as". We laten ALLEEN de selected servo de as
+			# claimen; als de andere servo al diezelfde as had, swappen we
+			# automatisch (zo voorkomen we per ongeluk twee servo's op X).
+			if cmd in ("X", "Y"):
+				new_axis = cmd.lower()
+				other = 2 if selected == 1 else 1
+				if cal[other].axis == new_axis:
+					old = cal[selected].axis
+					cal[other].axis = old if old in ("x", "y") else ("y" if new_axis == "x" else "x")
+					print(f"S{other} axis automatisch naar '{cal[other].axis}' gezet (was '{new_axis}').")
+				cal[selected].axis = new_axis
+				print(_status_line(selected, current_us, cal))
+				continue
+			if cmd == "i":
+				cal[selected].invert = not bool(cal[selected].invert)
+				print(_status_line(selected, current_us, cal))
+				continue
 
 			if cmd == "o":
 				pi.set_servo_pulsewidth(cal[selected].gpio, 0)
@@ -218,9 +262,27 @@ def main() -> int:
 				continue
 
 			if cmd == "s":
+				# We droppen velden die niet expliciet gezet zijn (axis/invert
+				# kunnen None resp. False blijven) zodat de file minimaal blijft
+				# en backward-compatible met loaders die deze keys nog niet
+				# kennen. ``stow_us`` is via setattr op het dataclass-instantie
+				# gezet als de operator 'w' gebruikt heeft; ophalen via getattr
+				# met default None.
+				def _entry(idx: int) -> dict:
+					c = cal[idx]
+					out: dict = asdict(c)
+					stow = getattr(c, "stow_us", None)
+					if isinstance(stow, int):
+						out["stow_us"] = stow
+					if not c.invert:
+						out.pop("invert", None)
+					if not c.axis:
+						out.pop("axis", None)
+					return out
+
 				data = {
-					"servo1": asdict(cal[1]),
-					"servo2": asdict(cal[2]),
+					"servo1": _entry(1),
+					"servo2": _entry(2),
 					"saved_at": int(time.time()),
 				}
 				args.json.parent.mkdir(parents=True, exist_ok=True)

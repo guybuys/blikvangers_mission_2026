@@ -28,10 +28,17 @@ compatibel zijn):
 * Regeldoel is ``gx → 0`` en ``gy → 0`` (**zero-target**). Montage-conventie
   moet dus zijn dat "waterpas" ≈ ``gx=gy=0``. Zo niet: monteer opnieuw of
   herkalibreer de servo-axes.
-* ``kx`` werkt op **servo1 / gx-fout**, ``ky`` op **servo2 / gy-fout**
-  (``swap_control_axes=True`` draait ze om — zelfde semantiek als de CLI).
+* ``kx`` werkt op de **X-fout** (gx) en wordt naar servo ``axis_x_servo``
+  gerouteerd; idem ``ky`` → ``axis_y_servo``. Per-as ``invert_x``/``invert_y``
+  flippen het teken van de correctie. De helper
+  :func:`gimbal_axis_mapping` leidt deze 4 velden af uit ``ServoCal.axis``
+  + ``ServoCal.invert`` zodat de cal de "ground truth" blijft. De legacy
+  ``swap_control_axes`` flag (CLI-flag uit pre-mapping tijdperk) wisselt
+  alleen ``axis_x_servo``/``axis_y_servo``; nieuwe code zet de mapping-
+  velden expliciet.
 * ``α`` (LPF-factor) filtert de raw-zwaartekracht vóór de regelaar:
-  ``fg = α·fg + (1−α)·g``. Default 0.85 komt uit de originele tuning.
+  ``fg = α·fg + (1−α)·g``. Default 0.90 komt uit de slinger-validatie
+  (april 2026); te lage α gaf zichtbaar "dansen" tijdens vasthouden.
 * Alle veiligheidsclamps (``g_min``/``g_max`` norm, ``loop_max_dg``
   spike-detectie, ``ServoCal.clamp``, ``max_us_step`` rate-limit) blijven
   identiek aan de originele implementatie; dit is een port, geen redesign.
@@ -46,9 +53,73 @@ from typing import Optional, Tuple
 from .controller import ServoCal
 
 __all__ = [
+	"AxisMapping",
 	"GimbalLoop",
 	"GimbalStatus",
+	"gimbal_axis_mapping",
 ]
+
+
+@dataclass(frozen=True)
+class AxisMapping:
+	"""Hoe servo1/2 op de control-assen X/Y mappen.
+
+	Output van :func:`gimbal_axis_mapping`. Velden:
+
+	* ``axis_x_servo`` / ``axis_y_servo``: index (1 of 2) van de servo die
+	  respectievelijk de X- en Y-as compenseert. Altijd verschillend.
+	* ``invert_x`` / ``invert_y``: of de **correctie** voor die as in teken
+	  omgekeerd moet worden (bv. omdat de servo mechanisch gespiegeld is
+	  tov het sensor-frame). Standaard False — dan geldt het zelfde teken
+	  als ``-kx*ex`` en ``-ky*ey`` (negatief feedback in beide assen).
+	* ``derived_from_default``: True als we naar de hardcoded defaults
+	  (``servo1=X, servo2=Y, geen invert``) terug zijn gevallen omdat de
+	  cal geen geldige ``axis``-velden bevatte. Handig voor logging.
+	"""
+
+	axis_x_servo: int
+	axis_y_servo: int
+	invert_x: bool
+	invert_y: bool
+	derived_from_default: bool
+
+
+def gimbal_axis_mapping(cal1: ServoCal, cal2: ServoCal) -> AxisMapping:
+	"""Bouw een :class:`AxisMapping` uit twee :class:`ServoCal`-objecten.
+
+	Beide servo's moeten een verschillende ``axis`` hebben (één "x", één "y");
+	zo niet (beide hetzelfde, beide ``None``, of een typo) vallen we terug op
+	de historische default ``servo1=X, servo2=Y, invert=False``.
+
+	Deze fallback is bewust silent — de caller (radio-service of CLI) hoort
+	een waarschuwing te tonen als hij dat wil. We willen niet dat een ontbrekend
+	veld de hele service bricked; oude calibraties moeten blijven werken.
+	"""
+	a1 = (cal1.axis or "").strip().lower() if cal1.axis else ""
+	a2 = (cal2.axis or "").strip().lower() if cal2.axis else ""
+	if a1 in ("x", "y") and a2 in ("x", "y") and a1 != a2:
+		if a1 == "x":
+			return AxisMapping(
+				axis_x_servo=1,
+				axis_y_servo=2,
+				invert_x=bool(cal1.invert),
+				invert_y=bool(cal2.invert),
+				derived_from_default=False,
+			)
+		return AxisMapping(
+			axis_x_servo=2,
+			axis_y_servo=1,
+			invert_x=bool(cal2.invert),
+			invert_y=bool(cal1.invert),
+			derived_from_default=False,
+		)
+	return AxisMapping(
+		axis_x_servo=1,
+		axis_y_servo=2,
+		invert_x=False,
+		invert_y=False,
+		derived_from_default=True,
+	)
 
 
 @dataclass
@@ -84,20 +155,40 @@ class GimbalLoop:
 	cal1: ServoCal
 	cal2: ServoCal
 
-	# Tuning — zelfde defaults als scripts/gimbal_level.py.
-	kx: float = 200.0
-	ky: float = 200.0
-	kix: float = 20.0
-	kiy: float = 20.0
-	alpha: float = 0.85
-	deadband_x: float = 0.10
-	deadband_y: float = 0.10
+	# Tuning — defaults uit de gevalideerde slinger-test in april 2026 op
+	# RPITSM0 (zie docs/servo_tuning.md). Bij hogere kx/ky (=200) ging de
+	# gimbal oscilleren bij rust; lagere kix/kiy (=5) lieten een rest-bias
+	# staan; alpha 0.85 + deadband 0.10 gaf zichtbaar "dansen" tijdens
+	# vasthouden. Deze waarden settle in ~2 s na een grote verstoring.
+	kx: float = 100.0
+	ky: float = 100.0
+	kix: float = 15.0
+	kiy: float = 15.0
+	alpha: float = 0.90
+	deadband_x: float = 0.18
+	deadband_y: float = 0.18
 	integral_max: float = 4.0
 	# max_us_step is per **tick**. De main loop in MISSION/TEST tikt ~5 Hz
 	# (rx_timeout 0.2 s), dus 20 µs/tick ≈ 100 µs/s — trager dan de 50 Hz-
-	# variant in ``gimbal_level.py`` (400 µs/s) maar voldoende voor normale
-	# correcties en veilig bij sensorruis. Caller kan verhogen via tuning.
+	# variant in ``gimbal_level.py`` (300 µs/s @ 6 µs/tick) maar voldoende
+	# voor normale correcties en veilig bij sensorruis. Caller kan verhogen
+	# via tuning.
 	max_us_step: int = 20
+
+	# Axis-mapping. Welke servo (1 of 2) compenseert resp. de X- en Y-fout,
+	# en moet het teken van die correctie omgekeerd worden? Defaults =
+	# historisch gedrag (``servo1=X, servo2=Y, geen invert``). Caller die
+	# dit uit ``ServoCal.axis`` wil afleiden gebruikt
+	# :func:`gimbal_axis_mapping` en zet de velden expliciet.
+	axis_x_servo: int = 1
+	axis_y_servo: int = 2
+	invert_x: bool = False
+	invert_y: bool = False
+
+	# DEPRECATED — bestond als CLI-flag voor we de mapping in de cal hadden.
+	# Wanneer True interpreteren we dat als "ruil ``axis_x_servo`` en
+	# ``axis_y_servo`` om" zodat oude scripts/services blijven werken zonder
+	# de cal te moeten herschrijven. Nieuwe code: zet de axis-velden expliciet.
 	swap_control_axes: bool = False
 
 	# Veiligheidsgrenzen op de raw-zwaartekracht (m/s²).
@@ -130,6 +221,21 @@ class GimbalLoop:
 	_ticks: int = field(default=0, init=False)
 	_good_samples: int = field(default=0, init=False)
 	_rejected_samples: int = field(default=0, init=False)
+
+	def __post_init__(self) -> None:
+		# Valideer de axis-mapping zodat we nooit per ongeluk twee correcties
+		# op dezelfde servo stapelen (= ongedefinieerd gedrag, motor zou de
+		# som van X- en Y-correctie krijgen). Sluit ook 0/3-typo's vroeg af.
+		if self.axis_x_servo not in (1, 2) or self.axis_y_servo not in (1, 2):
+			raise ValueError(
+				"axis_x_servo/axis_y_servo moeten 1 of 2 zijn, niet "
+				f"{self.axis_x_servo}/{self.axis_y_servo}"
+			)
+		if self.axis_x_servo == self.axis_y_servo:
+			raise ValueError(
+				"axis_x_servo en axis_y_servo mogen niet gelijk zijn "
+				f"(beide {self.axis_x_servo})"
+			)
 
 	@property
 	def enabled(self) -> bool:
@@ -314,13 +420,40 @@ class GimbalLoop:
 				min(self.integral_max, self._int_ey + ey_raw * dt),
 			)
 
-		# PI → target µs, met as-swap identiek aan CLI.
+		# Bouw de twee assen-correcties (in µs t.o.v. center). Daarna routeren
+		# we ze naar servo1/servo2 volgens de mapping. Splitsing maakt
+		# ``swap_control_axes`` triviaal (= ruil welke servo welke as krijgt)
+		# en vermijdt dubbele if-branches voor swap × invert × axis.
+		corr_x = (-self.kx) * ex + (-self.kix) * self._int_ex
+		corr_y = (-self.ky) * ey + (-self.kiy) * self._int_ey
+		if self.invert_x:
+			corr_x = -corr_x
+		if self.invert_y:
+			corr_y = -corr_y
+
+		# Effectieve mapping: legacy swap-flag wint, anders de expliciete
+		# axis-velden. Bij swap zwaaien we ALLEEN de servo-toewijzing om;
+		# de invert-flags blijven aan hun "as" hangen (een fysieke remontage
+		# kan zowel de as als het teken flippen — twee onafhankelijke knoppen).
 		if self.swap_control_axes:
-			target1_f = c1 + (-self.ky) * ey + (-self.kiy) * self._int_ey
-			target2_f = c2 + (-self.kx) * ex + (-self.kix) * self._int_ex
+			ax = self.axis_y_servo
+			ay = self.axis_x_servo
 		else:
-			target1_f = c1 + (-self.kx) * ex + (-self.kix) * self._int_ex
-			target2_f = c2 + (-self.ky) * ey + (-self.kiy) * self._int_ey
+			ax = self.axis_x_servo
+			ay = self.axis_y_servo
+
+		# Combineer per-servo. axis_x_servo != axis_y_servo (gegarandeerd door
+		# __post_init__), dus precies één van beide additions raakt elke servo.
+		target1_f = float(c1)
+		target2_f = float(c2)
+		if ax == 1:
+			target1_f += corr_x
+		else:
+			target2_f += corr_x
+		if ay == 1:
+			target1_f += corr_y
+		else:
+			target2_f += corr_y
 
 		target_us1 = self.cal1.clamp(int(round(target1_f)))
 		target_us2 = self.cal2.clamp(int(round(target2_f)))

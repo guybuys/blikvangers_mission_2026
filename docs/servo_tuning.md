@@ -33,20 +33,29 @@ Beide paden lezen en schrijven dezelfde
 
 ```json
 {
-  "servo1": { "gpio": 13, "min_us": 1050, "center_us": 1400, "max_us": 1750, "stow_us": 1450 },
-  "servo2": { "gpio": 12, "min_us": 1150, "center_us": 1600, "max_us": 1950, "stow_us": 1600 },
+  "servo1": {
+    "gpio": 13, "min_us": 1050, "center_us": 1400, "max_us": 1750, "stow_us": 1450,
+    "axis": "y", "invert": false
+  },
+  "servo2": {
+    "gpio": 12, "min_us": 1150, "center_us": 1600, "max_us": 1950, "stow_us": 1600,
+    "axis": "x", "invert": false
+  },
   "saved_at": 1775260800
 }
 ```
 
-Per servo hebben we **vier** microseconde-waarden nodig:
+Per servo hebben we **vier** microseconde-waarden + twee optionele
+mapping-velden nodig:
 
-| Veld | Betekenis | Wordt gebruikt door |
-|---|---|---|
-| `min_us` | Pulse voor de ene mechanische aanslag | Clamp tijdens mission-runtime; gimbal-loop (Fase 9). |
-| `max_us` | Pulse voor de andere mechanische aanslag | Idem. |
-| `center_us` | Pulse voor de logische "nul-positie" | Start van tuning, `SERVO HOME`. |
-| `stow_us` | Pulse voor de "ingeklapte" safe-positie | `SERVO STOW`, `SERVO PARK`, autonome rail-policy. |
+| Veld | Verplicht? | Betekenis | Wordt gebruikt door |
+|---|---|---|---|
+| `min_us` | ja | Pulse voor de ene mechanische aanslag | Clamp tijdens mission-runtime; gimbal-loop (Fase 9). |
+| `max_us` | ja | Pulse voor de andere mechanische aanslag | Idem. |
+| `center_us` | ja | Pulse voor de logische "nul-positie" | Start van tuning, `SERVO HOME`, gimbal-loop nul-referentie. |
+| `stow_us` | ja | Pulse voor de "ingeklapte" safe-positie | `SERVO STOW`, `SERVO PARK`, autonome rail-policy. |
+| `axis` | nee | `"x"` of `"y"`: welke control-as compenseert deze servo | `gimbal_axis_mapping` in de Fase 9 closed-loop. Beide servo's moeten verschillende assen hebben; ontbrekend ⇒ default (servo1=X, servo2=Y) + warning. |
+| `invert` | nee | `true`/`false`: keer teken van de correctie om | Idem. Default `false`. Flippen na een mechanische re-mount. |
 
 > De **hardware-cap** is altijd **500 – 2500 µs**. Waarden buiten deze
 > range worden stil afgekapt om de servo-driver-IC te beschermen.
@@ -138,6 +147,9 @@ Letter-mapping (consistent met `scripts/gimbal/servo_calibration.py`):
 | `c` | Markeer huidige als **CENTER** | `SERVO CENTER` |
 | `x` | Markeer huidige als **MAX** | `SERVO MAX` |
 | `w` | Markeer huidige als **STOW** | `SERVO STOW_MARK` |
+| `X` (caps) | Tag geselecteerde servo als **control-as X** (de andere wordt automatisch Y) | (lokaal in `axis`-veld bij save) |
+| `Y` (caps) | Tag geselecteerde servo als **control-as Y** (de andere wordt automatisch X) | (lokaal in `axis`-veld bij save) |
+| `i` | Toggle invert-flag (sign-flip op de correctie) | (lokaal in `invert`-veld bij save) |
 | `p` | Status (rail/tuning/cur-us/cal) + reset watchdog | `SERVO STATUS` |
 | `s` | Save JSON | `SERVO SAVE` |
 | `q` | Stop tuning + sluit sub-REPL | `SERVO STOP` |
@@ -265,12 +277,20 @@ De service accepteert deze flags (bijv. in
 | Flag | Default | Betekenis |
 |---|---|---|
 | `--gimbal-auto-enable` | off | Start met `GIMBAL ON` direct bij boot. Default **uit**: een verkeerd gemonteerde sensor zou anders meteen aan de servo's trekken. |
-| `--gimbal-kx` | 200.0 | P-gain servo1 / gx-fout (µs per m/s²). |
-| `--gimbal-ky` | 200.0 | P-gain servo2 / gy-fout. |
-| `--gimbal-kix` | 20.0 | I-gain servo1. 0 = uit. |
-| `--gimbal-kiy` | 20.0 | I-gain servo2. 0 = uit. |
+| `--gimbal-kx` | 100.0 | P-gain X-as / gx-fout (µs per m/s²). |
+| `--gimbal-ky` | 100.0 | P-gain Y-as / gy-fout. |
+| `--gimbal-kix` | 15.0 | I-gain X-as. 0 = uit. |
+| `--gimbal-kiy` | 15.0 | I-gain Y-as. 0 = uit. |
+| `--gimbal-deadband-x` | 0.18 | P-deadband op X-fout (m/s²); I-term blijft wel integreren. |
+| `--gimbal-deadband-y` | 0.18 | P-deadband op Y-fout. |
+| `--gimbal-alpha` | 0.90 | LPF-factor (`fg = α·fg + (1-α)·g`). Hoger = sterker filter, minder ruis, tragere respons. |
 | `--gimbal-max-us-step` | 20 | Max PWM-verandering per regeltick (~5 Hz → 100 µs/s). |
-| `--gimbal-swap-axes` | off | Ruil `gx→servo1 / gy→servo2` om (makkelijker dan re-kalibreren). |
+| `--gimbal-swap-axes` | off | **Legacy override**: ruil `X→servo1 / Y→servo2` om. Nieuwe code zet `axis` per servo in `servo_calibration.json`; deze flag wint daar wel van. |
+
+> Deze defaults komen uit de slinger-validatie (RPITSM0, april 2026). Hogere
+> `kx`/`ky` (=200) gaf zichtbare oscillatie bij rust; lagere `kix`/`kiy` (=5)
+> liet een rest-bias staan. Met deze waarden settle de gimbal in ~2 s na een
+> grote verstoring.
 
 Tuning-conventie is identiek aan
 [`scripts/gimbal_level.py`](../scripts/gimbal_level.py); waardes
@@ -285,8 +305,8 @@ van er blind op te reageren:
   (filtert freefall + saturatie).
 - **Spike-check**: maximaal 2.5 m/s² verandering per tick in één as
   (filtert kabel-glitches). Eerste sample zaait enkel de LPF.
-- **LPF**: α=0.85 op de raw-vector (verschuift naar 5 Hz tick-rate).
-- **Deadband**: ±0.10 m/s² op de P-term; de I-term integreert wél
+- **LPF**: α=0.90 op de raw-vector (april 2026 tuning).
+- **Deadband**: ±0.18 m/s² op de P-term; de I-term integreert wél
   door zodat kleine biassen toch wegregelen.
 - **Clamp**: elke PWM gaat door `ServoCal.clamp()` vóór het de rail
   bereikt, net als bij `SERVO SET/HOME/STOW`.
@@ -382,7 +402,7 @@ BS> !gimbal status
 | `T` stilstaand op 0, `R` groeit | Sensor levert samples buiten `g_min..g_max` of voortdurend spikes | `!servo disable`, check BNO055-bedrading / sensor-mount |
 | `X`/`Y` beweegt, `U=u1/u2` niet | `max_us_step=0`, of clamp (cal.min/max) blokkeert | Check `--gimbal-max-us-step` > 0; kalibreer range breder |
 | Servo beweegt de **juiste** fysieke as maar naar de **verkeerde kant** | Sign is omgekeerd (gimbal *versterkt* de kanteling i.p.v. compenseren) | Negatieve `--gimbal-kx` (of `-ky`) in de service-override |
-| Pitch-kanteling stuurt de **roll-servo** i.p.v. pitch-servo (of omgekeerd) | As-mapping is geswapped | `--gimbal-swap-axes` aanzetten (1-op-1 zwak dan `kx`↔`ky`) |
+| Pitch-kanteling stuurt de **roll-servo** i.p.v. pitch-servo (of omgekeerd) | As-mapping is geswapped | Permanent: edit `servo_calibration.json` zodat `axis` per servo klopt (`!servo` → `1` → `Y`, `2` → `X`, `s`). Tijdelijk: `--gimbal-swap-axes` flag. |
 | Beide bovenstaande tegelijk (verkeerde as én verkeerde kant) | Waarschijnlijk 1 servo mechanisch omgekeerd gemonteerd + PWM swap | Eerst fysiek checken; beide software-fixes combineren kan tot verwarring leiden |
 | `!servo home` = mechanische lock (servo tegen eindstop) | `center_us` hoort bij een andere GPIO — je hebt PWM-kabels omgedraaid zonder kalibratie bij te werken | Óf kabels terug zoals vroeger, óf volledige her-kalibratie (`!servo` vanaf nul) |
 
@@ -422,7 +442,7 @@ neem die over als `--gimbal-…`-flags in de service.
 | `!gimbal on` reply = `ERR GMB NOHW` | Geen BNO055 **of** calibratie mist `center_us` | Check service-log: "Gimbal-loop beschikbaar …" moet bij boot staan. Zo niet: `!preflight`, kalibreer servo's opnieuw, of check de BNO055-bedrading |
 | `GET GIMBAL` toont `R` oplopend, `T` stil | Gravity-samples worden verworpen (norm of spike) | BNO055-sensor in saturatie (hevige trillingen) of kabel los — `GIMBAL OFF`, debug sensor, daarna opnieuw `ON` |
 | Gimbal jaagt / oscilleert in DEPLOYED | `--gimbal-kx` / `--gimbal-ky` te hoog | Begin met `!gimbal off`, halveer de gain in de service-override, reboot de service, test met `!test 30` |
-| Gimbal corrigeert in verkeerde as | Sensor-frame ≠ gimbal-frame | Gebruik `--gimbal-swap-axes` (of negatief `kx`/`ky`) i.p.v. kalibratie opnieuw te doen |
+| Gimbal corrigeert in verkeerde as | Sensor-frame ≠ gimbal-frame | Edit `axis` per servo in `servo_calibration.json` (via `!servo` → `X`/`Y`/`s`). Tijdelijk: `--gimbal-swap-axes`. Verkeerd teken? Toggle `invert` (toets `i`) of negatief `--gimbal-kx/-ky`. |
 
 ---
 
