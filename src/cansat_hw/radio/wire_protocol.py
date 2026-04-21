@@ -72,7 +72,19 @@ DEFAULT_DEPLOY_SHOCK_G = 8.0
 DEFAULT_LAND_IMPACT_G = 12.0
 DEFAULT_LAND_STABLE_S = 8.0
 PREFLIGHT_MIN_FREE_MB = 500
+# Minimale BNO055 calibratie-drempels voor MISSION/TEST-preflight.
+#   * sys ≥ 1 : fusion-engine vertrouwt zichzelf minimaal (bestaande drempel).
+#   * acc ≥ 2 : zonder dit is ``read_gravity()`` systematisch gebiased — exact
+#     de root-cause van de 2026-04-19 gimbal-saturatie (rapport in docs/).
+#     BNO055 reports accel-cal=3 na een standaard 6-posities procedure; 2 is
+#     ook nog ok (≈ 4°) en realistischer voor field-operaties.
+#   * mag ≥ 2 : NDOF heading gebruikt magnetometer; zonder dit drifft sys
+#     terug naar 0 en wordt de gravity-schatting opnieuw onbetrouwbaar.
+# Fix met ``PRE BNO`` in error-response (preflight_checks) zodat de operator
+# meteen ziet dat het om een cal-issue gaat — niet om ontbrekende hardware.
 PREFLIGHT_BNO_SYS_MIN = 1
+PREFLIGHT_BNO_ACC_MIN = 2
+PREFLIGHT_BNO_MAG_MIN = 2
 # CAL GROUND: eerst ``state.alt_prime_samples`` warm-up reads om het IIR-filter
 # in te halen op de echte huidige druk, dán ``GROUND_CAL_SAMPLES`` extra reads
 # middelen voor een ruisarme grondreferentie. Het oude gedrag (8 samples zonder
@@ -576,9 +588,21 @@ def preflight_checks(
 		missing.append("IMU")
 	else:
 		try:
-			sys_cal = bno055.calibration_status()[0]
-			if int(sys_cal) < PREFLIGHT_BNO_SYS_MIN:
+			cs = bno055.calibration_status()
+			sys_cal, _gyr, acc_cal, mag_cal = int(cs[0]), int(cs[1]), int(cs[2]), int(cs[3])
+			# We splitsen de sub-code bewust NIET in drie aparte tokens
+			# (IMUSYS/IMUACC/IMUMAG) omdat het 60-byte TLM-reply dan snel
+			# overloopt. In plaats daarvan gebruiken we ``IMU`` als missing-
+			# code en hangen een compact info-token ``BNO=s/a/m`` aan de
+			# reply zodat de operator dezelfde diagnose krijgt.
+			imu_bad = (
+				sys_cal < PREFLIGHT_BNO_SYS_MIN
+				or acc_cal < PREFLIGHT_BNO_ACC_MIN
+				or mag_cal < PREFLIGHT_BNO_MAG_MIN
+			)
+			if imu_bad:
 				missing.append("IMU")
+			info.append("BNO=%d/%d/%d" % (sys_cal, acc_cal, mag_cal))
 		except Exception:  # noqa: BLE001
 			missing.append("IMU")
 

@@ -199,6 +199,26 @@ def main() -> int:
 		help="Geen BNO055 initialiseren (geen READ BNO055 over radio)",
 	)
 	p.add_argument(
+		"--bno055-cal",
+		type=str,
+		default=str(_ROOT / "config" / "bno055_calibration.json"),
+		help=(
+			"Per-Zero calibratie-JSON (bij boot in de chip geschreven zodat de "
+			"BNO055 direct plausibele gravity/heading geeft). Niet-bestaand ⇒ "
+			"fallback op --bno055-cal-default. Genereren met "
+			"scripts/bno055_calibrate.py --save."
+		),
+	)
+	p.add_argument(
+		"--bno055-cal-default",
+		type=str,
+		default=str(_ROOT / "config" / "bno055_calibration.default.json"),
+		help=(
+			"Best-effort fallback-profiel (in de repo). Gebruikt als "
+			"--bno055-cal niet bestaat. Zet op '' om fallback uit te zetten."
+		),
+	)
+	p.add_argument(
 		"--photo-dir",
 		type=str,
 		default=str(Path.home() / "photos"),
@@ -412,7 +432,7 @@ def main() -> int:
 	bno055 = None
 	if not args.no_bno055 and i2c_dev.exists():
 		try:
-			from cansat_hw.sensors.bno055 import BNO055
+			from cansat_hw.sensors.bno055 import BNO055, load_profile_file
 
 			bno055 = BNO055(args.i2c_bus, args.bno055_addr)
 			if bno055.chip_id != 0xA0:
@@ -422,6 +442,61 @@ def main() -> int:
 				)
 				bno055.close()
 				bno055 = None
+			else:
+				# Herstel kalibratie-profiel zodat read_gravity() niet op een
+				# ongekalibreerde accel leunt (gimbal-saturatie 2026-04-19).
+				# Volgorde: eerst per-Zero JSON, dan repo-default, dan niks ⇒
+				# live cal is nog steeds nodig maar de chip faalt tenminste niet
+				# silent. Fouten hier zijn nooit fataal: de service start altijd.
+				_cal_primary = Path(args.bno055_cal).expanduser() if args.bno055_cal else None
+				_cal_fallback = (
+					Path(args.bno055_cal_default).expanduser()
+					if args.bno055_cal_default
+					else None
+				)
+				_cal_loaded_from: Optional[Path] = None
+				for _candidate in (_cal_primary, _cal_fallback):
+					if _candidate is None:
+						continue
+					try:
+						_blob = load_profile_file(_candidate)
+					except Exception as e:  # noqa: BLE001
+						print(
+							f"WARN: kon {_candidate} niet parsen: {e}",
+							file=sys.stderr,
+						)
+						continue
+					if _blob is None:
+						continue
+					try:
+						bno055.write_calibration_profile(_blob)
+					except Exception as e:  # noqa: BLE001
+						print(
+							f"WARN: BNO055 profile-write uit {_candidate} faalde: {e}",
+							file=sys.stderr,
+						)
+						continue
+					_cal_loaded_from = _candidate
+					break
+				if _cal_loaded_from is not None:
+					# Geef de fusion-engine een paar samples om ``sys`` uit 0 te laten
+					# klimmen zodat een onmiddellijke GET STATUS / preflight niet
+					# meteen "IMU" in missing raporteert.
+					time.sleep(0.3)
+					try:
+						_cs = bno055.calibration_status()
+						print(
+							f"BNO055 cal geladen uit {_cal_loaded_from} — "
+							f"sys={_cs[0]} gyr={_cs[1]} acc={_cs[2]} mag={_cs[3]}",
+						)
+					except Exception:
+						print(f"BNO055 cal geladen uit {_cal_loaded_from}")
+				else:
+					print(
+						"BNO055 cal: geen profiel gevonden "
+						"(run scripts/bno055_calibrate.py --save voor persistente cal)",
+						file=sys.stderr,
+					)
 		except Exception as e:  # noqa: BLE001
 			print("WARN: BNO055 niet beschikbaar:", e, file=sys.stderr)
 			if bno055 is not None:

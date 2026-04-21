@@ -1,0 +1,12 @@
+{
+  "_comment": "Schema-voorbeeld — zie src/cansat_hw/sensors/bno055/profile.py. De echte, per-Zero file heet config/bno055_calibration.json (buiten git; gegenereerd door scripts/bno055_calibrate.py --save). De default-fallback voor verse installaties heet config/bno055_calibration.default.json (wel in git).",
+  "schema": 1,
+  "saved_at": "2026-04-21T00:00:00+00:00",
+  "calibration_at_save": "sys=3 gyr=3 acc=3 mag=3",
+  "accel_offset": [0, 0, 0],
+  "mag_offset": [0, 0, 0],
+  "gyro_offset": [0, 0, 0],
+  "accel_radius": 1000,
+  "mag_radius": 600,
+  "raw_hex": "0000000000000000000000000000000000000000e8035802"
+}

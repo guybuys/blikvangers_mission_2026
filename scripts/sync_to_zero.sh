@@ -56,6 +56,11 @@ EXCLUDES=(
 	# stow_us wegvegen of een mechanisch onveilige center_us terugzetten
 	# (zie incident 2026-04-19).
 	'config/gimbal/servo_calibration.json'
+	# BNO055-kalibratieprofiel: per-Zero, gedumpt door
+	# scripts/bno055_calibrate.py --save. Bij sync overschrijven zou betekenen
+	# dat een cal-sessie van 10 min verloren gaat; de repo-default
+	# (config/bno055_calibration.default.json) wordt wél gesynct.
+	'config/bno055_calibration.json'
 	'cansat_logs/'
 	'photos/'
 

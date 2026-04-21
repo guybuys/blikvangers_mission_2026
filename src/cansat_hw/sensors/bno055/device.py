@@ -27,6 +27,19 @@ BNO055_OPR_MODE_ADDR = 0x3D
 BNO055_PWR_MODE_ADDR = 0x3E
 BNO055_SYS_TRIGGER_ADDR = 0x3F
 
+# Calibration profile: 22 aaneengesloten bytes vanaf 0x55 t/m 0x6A. Layout
+# (datasheet §4.2.20 e.v., klein-endian):
+#   0x55..0x5A  ACCEL_OFFSET_X/Y/Z   (int16, 3×2 B)
+#   0x5B..0x60  MAG_OFFSET_X/Y/Z     (int16, 3×2 B)
+#   0x61..0x66  GYRO_OFFSET_X/Y/Z    (int16, 3×2 B)
+#   0x67..0x68  ACCEL_RADIUS         (int16)
+#   0x69..0x6A  MAG_RADIUS           (int16)
+# Lezen/schrijven moet **in CONFIG mode** (datasheet §3.11.4); het fusion-
+# resultaat van de lopende NDOF-sessie blijft daarbij behouden zolang we de
+# chip niet power-cyclen.
+BNO055_ACCEL_OFFSET_X_LSB_ADDR = 0x55
+BNO055_CALIB_PROFILE_LENGTH = 22
+
 BNO055_CHIP_ID = 0xA0
 
 OPERATION_MODE_CONFIG = 0x00
@@ -175,6 +188,62 @@ class BNO055:
 		raw = self._read_block(BNO055_GRAVITY_DATA_X_LSB, 6)
 		x, y, z = struct.unpack("<hhh", raw)
 		return x / 100.0, y / 100.0, z / 100.0
+
+	def read_calibration_profile(self) -> bytes:
+		"""Lees 22-byte calibratie-profiel (accel/mag/gyro offsets + radii).
+
+		De BNO055 laat calibratie-offsets alleen lezen of schrijven in CONFIG
+		mode — in NDOF zijn die registers read-/write-locked door de fusion-
+		engine (datasheet §3.11.4). We schakelen dus kort naar CONFIG, lezen
+		het blok, en gaan terug naar de eerder gekozen ``_fusion_mode``. Het
+		volledige rondje duurt ±70 ms (twee mode-switches à ~20 ms + I²C-block-
+		read); de NDOF-fusion-toestand blijft behouden zolang de chip niet
+		wordt gepower-cycled.
+		"""
+		self._ensure_page0()
+		self._set_mode(OPERATION_MODE_CONFIG)
+		try:
+			data = self._read_block(
+				BNO055_ACCEL_OFFSET_X_LSB_ADDR, BNO055_CALIB_PROFILE_LENGTH
+			)
+		finally:
+			self._set_mode(self._fusion_mode)
+			time.sleep(0.02)
+		if len(data) != BNO055_CALIB_PROFILE_LENGTH:
+			raise RuntimeError(
+				f"BNO055 profile read gaf {len(data)} B, verwacht "
+				f"{BNO055_CALIB_PROFILE_LENGTH}"
+			)
+		return data
+
+	def write_calibration_profile(self, data: bytes) -> None:
+		"""Schrijf 22-byte calibratie-profiel terug; chip start direct met die offsets.
+
+		Alleen mogelijk in CONFIG mode (datasheet §3.11.4). Na de write keren
+		we terug naar ``_fusion_mode`` en wacht de chip ±50 ms om de fusion
+		te laten aanlopen met de nieuwe offsets. De ``sys``-cal blijft eerst
+		op 0 en klimt na enkele seconden naar 3 zodra de sensor ziet dat de
+		offsets kloppen — dit is normaal gedrag, geen mislukte restore.
+		"""
+		if len(data) != BNO055_CALIB_PROFILE_LENGTH:
+			raise ValueError(
+				f"calibratie-profiel moet {BNO055_CALIB_PROFILE_LENGTH} B zijn, "
+				f"kreeg {len(data)} B"
+			)
+		self._ensure_page0()
+		self._set_mode(OPERATION_MODE_CONFIG)
+		try:
+			# SMBus ``write_i2c_block_data`` accepteert ≤32 data-bytes — 22 past
+			# ruim. We schrijven in één commando zodat de BNO055 de offsets
+			# atomisch opneemt (anders kan fusion op een half profiel enabled
+			# worden zodra we terug naar NDOF gaan).
+			self._bus.write_i2c_block_data(
+				self._address, BNO055_ACCEL_OFFSET_X_LSB_ADDR, list(data)
+			)
+			time.sleep(0.02)
+		finally:
+			self._set_mode(self._fusion_mode)
+			time.sleep(0.05)
 
 	def read_wire_reply(self) -> str:
 		"""Compact voor radio: euler + calibratie."""

@@ -40,6 +40,12 @@ config/radio_runtime.json
 # voor het schema. Bewust uit git om verkeerde center_us-waarden niet
 # accidenteel terug te kunnen pushen (incident 2026-04-19).
 config/gimbal/servo_calibration.json
+# Per-Zero BNO055 kalibratie-profiel (accel/mag/gyro offsets + radii). De
+# BNO055 vergeet z'n cal bij elke power-cycle; dit bestand wordt gedumpt door
+# scripts/bno055_calibrate.py --save en bij boot door de radio-service terug
+# in de chip geschreven. Per-hardware, dus buiten git — de repo-fallback leeft
+# in config/bno055_calibration.default.json (wel in git, best-effort).
+config/bno055_calibration.json
 cansat_logs/
 photos/
 # Lokale spiegel van /home/icw/photos/ op de Zero, gevuld door

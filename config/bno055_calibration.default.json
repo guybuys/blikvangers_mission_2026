@@ -1,0 +1,12 @@
+{
+  "_comment": "Best-effort default — in de repo voor verse Zero-installaties. Overschrijf per-Zero met scripts/bno055_calibrate.py --save (dat schrijft naar config/bno055_calibration.json, buiten git). Dit bestand bijwerken? Draai scripts/bno055_calibrate.py --save --save-default op een goed gekalibreerde Zero en commit de gewijzigde raw_hex + velden. LET OP: nul-offsets + standaard-radii betekenen 'no prior cal' — de chip start dan effectief ongeleidend en de live-kalibratie gebeurt alsnog vanaf scratch; dat is prima als fallback maar niet optimaal.",
+  "schema": 1,
+  "saved_at": "2026-04-21T00:00:00+00:00",
+  "calibration_at_save": "sys=0 gyr=0 acc=0 mag=0 (placeholder)",
+  "accel_offset": [0, 0, 0],
+  "mag_offset": [0, 0, 0],
+  "gyro_offset": [0, 0, 0],
+  "accel_radius": 1000,
+  "mag_radius": 600,
+  "raw_hex": "0000000000000000000000000000000000000000e8035802"
+}
