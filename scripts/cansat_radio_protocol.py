@@ -863,20 +863,22 @@ def main() -> int:
 				camera_thread.set_active(
 					int(state.flight_state) == int(_STATE_DEPLOYED)
 				)
-			# Gimbal closed-loop tick. Drievoudige gate:
-			#   (a) loop bestaat (servo+BNO055+calibratie OK),
-			#   (b) loop is enabled (via CLI of GIMBAL ON),
-			#   (c) flight_state == DEPLOYED **en** rail staat aan.
-			# Zonder (c) zouden we tijdens PAD_IDLE/ASCENT al pulses
-			# schrijven — state-policy houdt de rail uit, maar we willen
-			# óók geen pulses op een dode rail queueen. Een I²C-read op de
-			# BNO kost ~1 ms; we doen 'm alleen als alle gates pass.
+			# Gimbal closed-loop tick. Tweevoudige gate:
+			#   (a) loop bestaat + is enabled (via CLI of GIMBAL ON),
+			#   (b) rail staat aan.
+			# ``rail_on`` is meteen de veiligheidsbarrière: buiten CONFIG
+			# kan de operator de rail niet handmatig aanzetten (``SERVO
+			# ENABLE`` is CONFIG-only, zie wire_protocol), en de state-
+			# policy schakelt hem enkel in bij ``DEPLOYED`` (mission of
+			# test). Dus in PAD_IDLE/ASCENT/LANDED schrijft de loop nooit
+			# pulses, en in CONFIG werkt hij wél wanneer de operator
+			# expliciet ``!servo home`` + ``!gimbal on`` doet — cruciaal
+			# voor as-mapping / sign-diagnose zonder hele ``!test``-cyclus.
 			if (
 				gimbal_loop is not None
 				and gimbal_loop.enabled
 				and servo is not None
 				and servo.rail_on
-				and int(state.flight_state) == int(_STATE_DEPLOYED)
 			):
 				try:
 					grav = bno055.read_gravity() if bno055 is not None else None
@@ -975,6 +977,19 @@ def main() -> int:
 			# Korte receive-timeout in TEST/MISSION zodat de TLM-scheduler
 			# responsief blijft (anders zou args.poll—vaak 1+ s—de cadence dempen).
 			rx_timeout = 0.2 if state.mode in ("TEST", "MISSION") else args.poll
+			# Gimbal-diagnose in CONFIG: wanneer de loop actief is én de
+			# rail aan staat, willen we ook daar op ~5 Hz tikken. Anders
+			# zou de regelaar in CONFIG maar args.poll-keer per seconde
+			# updaten (≈1 Hz), wat bij ``--gimbal-max-us-step 20`` = 20
+			# µs/s oplevert — veel te traag om visueel kantel-diagnose
+			# te doen.
+			if (
+				gimbal_loop is not None
+				and gimbal_loop.enabled
+				and servo is not None
+				and servo.rail_on
+			):
+				rx_timeout = min(rx_timeout, 0.2)
 			# with_header=True: afzender = byte 1 voor reply destination
 			# with_ack=False: geen RadioHead-ACK vóór onze tekstantwoord
 			pkt = rfm.receive(timeout=rx_timeout, with_header=True, with_ack=False, keep_listening=True)

@@ -298,6 +298,98 @@ van er blind op te reageren:
 samples) — als `R` blijft oplopen terwijl `T` stilstaat, zit je sensor
 in saturatie of is de sensor-kabel niet geaard.
 
+### Wanneer regelt de loop écht?
+
+Er zijn twee gates in de main loop (beide moeten open staan):
+
+1. **``!gimbal on``** → `gimbal_loop.enabled = True`.
+2. **Rail aan** → `servo.rail_on == True`.
+
+De rail-status volgt automatisch uit de [state-policy](mission_states.md#servo-rail-policy-per-flight-state):
+
+| Mode / state | Rail | Loop regelt? |
+|---|---|---|
+| `CONFIG` (rail uit) | uit | **nee** — operator moet eerst `!servo enable` of `!servo home` |
+| `CONFIG` + `!servo home` | **aan** | **ja, als `!gimbal on`** — dit is de diagnose-mode |
+| `MISSION/PAD_IDLE` | uit | nee |
+| `MISSION/ASCENT` | uit | nee |
+| `MISSION/DEPLOYED` | **aan** | **ja** — productie-case |
+| `MISSION/LANDED` | uit | nee |
+| `TEST/DEPLOYED` | **aan** | **ja** — dry-run |
+
+Omdat `SERVO ENABLE` / `SERVO HOME` enkel in CONFIG mag, kan de loop
+*buiten* CONFIG niet per ongeluk actief worden tijdens bv. `PAD_IDLE`
+— de rail is daar altijd uit via de state-policy, en handmatige
+overrides worden geweigerd met `ERR BUSY MISSION`.
+
+Wanneer de loop in CONFIG actief is, schakelt de service ook de main-
+loop-polling op naar ~5 Hz (i.p.v. `--poll`, typisch 1 Hz). Zo geeft
+`--gimbal-max-us-step 20` dezelfde ~100 µs/s die je ook in MISSION/TEST
+krijgt, en kan je het regelgedrag visueel beoordelen.
+
+### Snelle diagnose: reageert de gimbal in de juiste richting?
+
+Nieuwe servo's, ander frame, of in het verleden ooit PWM-kabels
+omgedraaid? Dan is het slim om vóór een `!test` even kort te checken
+welke servo welke as stuurt en of het teken klopt. Dat kan volledig via
+radio vanuit de Pico-REPL:
+
+```text
+# 1. Start veilig — rail uit, geen pulses.
+BS> !servo disable
+BS> !servo status
+    → OK SVO R=off T=off SEL=- US1=0 US2=0 CAL=yes
+
+# 2. Beide servo's naar hun gekalibreerde center. Kijk wat er
+#    fysiek gebeurt.
+BS> !servo home
+    → OK SVO HOME US1=1500 US2=1600       (voorbeeld-getallen)
+#   Verwacht: beide servo's in het midden van hun range, gimbal
+#   waterpas / neutraal. Eén in een extreme positie? → PWM-stekkers
+#   zitten op de verkeerde GPIO, of center_us klopt niet.
+
+# 3. Welke fysieke as stuurt servo 1 vs servo 2?
+BS> !servo            # opent sub-REPL
+servo> 1              # selecteer servo 1
+servo> A A            # -100 µs (grove stap)
+#   Observeer: welke as van de gimbal kantelt? Noteer (bv. pitch).
+servo> D D            # terug naar center
+servo> 2              # zelfde voor servo 2
+servo> A A
+#   Observeer: welke as? (bv. roll)
+servo> q              # sluit sub-REPL, servo's uit
+
+# 4. Terug naar center, dan closed-loop aanzetten.
+BS> !servo home
+BS> !gimbal on
+    → OK GIMBAL ON
+BS> !gimbal status
+    → OK GIMBAL E=on P=cold T=0 R=0 EX=NA EY=NA U1=1500 U2=1600
+#   P=cold = LPF nog niet gezaaid; wacht 1-2 sec. na !gimbal on.
+
+# 5. Kantel de cansat LANGZAAM in één as — bv. pitch omhoog ~15°.
+#    Houd hem gekanteld, doe telkens:
+BS> !gimbal status
+#   Verwacht: EX of EY is niet-nul (in cg = 1/100 m/s²; 15° ≈ 250 cg),
+#   en U1 of U2 schuift weg van center richting de "compenserende"
+#   kant (de servo probeert de camera waterpas te houden).
+```
+
+**Diagnose-matrix** bij stap 5:
+
+| Wat je ziet | Interpretatie | Fix |
+|---|---|---|
+| `T` stilstaand op 0, `R` groeit | Sensor levert samples buiten `g_min..g_max` of voortdurend spikes | `!servo disable`, check BNO055-bedrading / sensor-mount |
+| `EX`/`EY` beweegt, `U1`/`U2` niet | `max_us_step=0`, of clamp (cal.min/max) blokkeert | Check `--gimbal-max-us-step` > 0; kalibreer range breder |
+| Servo beweegt de **juiste** fysieke as maar naar de **verkeerde kant** | Sign is omgekeerd (gimbal *versterkt* de kanteling i.p.v. compenseren) | Negatieve `--gimbal-kx` (of `-ky`) in de service-override |
+| Pitch-kanteling stuurt de **roll-servo** i.p.v. pitch-servo (of omgekeerd) | As-mapping is geswapped | `--gimbal-swap-axes` aanzetten (1-op-1 zwak dan `kx`↔`ky`) |
+| Beide bovenstaande tegelijk (verkeerde as én verkeerde kant) | Waarschijnlijk 1 servo mechanisch omgekeerd gemonteerd + PWM swap | Eerst fysiek checken; beide software-fixes combineren kan tot verwarring leiden |
+| `!servo home` = mechanische lock (servo tegen eindstop) | `center_us` hoort bij een andere GPIO — je hebt PWM-kabels omgedraaid zonder kalibratie bij te werken | Óf kabels terug zoals vroeger, óf volledige her-kalibratie (`!servo` vanaf nul) |
+
+Als alles klopt: `!gimbal off` → `!servo disable` → ga over naar
+`!test 30` voor de échte DEPLOYED-gates, of `SET MODE MISSION` voor
+vlucht.
+
 ### Verschil met `scripts/gimbal_level.py`
 
 `gimbal_level.py` blijft bestaan als **SSH-only standalone tool** voor
@@ -306,7 +398,7 @@ Hz draaien met pigpio direct. De Zero-service gebruikt dezelfde
 wiskunde, maar:
 
 * tikt in de main loop op ~5 Hz (gedeeld met RX/TX en state-machine),
-* leest gravity alleen wanneer alle drie de gates open staan,
+* leest gravity alleen wanneer beide gates open staan (`enabled` + `rail_on`),
 * laat de rail-beheersing aan de state-policy,
 * heeft geen warm-up nodig (zero-target: "waterpas" = `gx=gy=0`).
 
