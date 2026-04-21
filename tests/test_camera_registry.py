@@ -102,7 +102,10 @@ class TestTagRegistry(unittest.TestCase):
 		reg = load_tag_registry(bundled)
 		self.assertEqual(reg.size_mm_for(26), 4500)
 		# Kleine missie-tags zijn opgemeten op 1.1 m (= 1100 mm).
-		self.assertEqual(reg.size_mm_for(1), 1100)
+		# IDs 85, 235, 317, 536 (gemeten in het veld — niet de vroegere
+		# schatting 1/2/3/4 die toevallig dezelfde afmeting had).
+		for tid in (85, 235, 317, 536):
+			self.assertEqual(reg.size_mm_for(tid), 1100, f"tag {tid}")
 		self.assertEqual(reg.size_mm_for(99), reg.default_size_mm)
 		# Sensor: OV2311 (Arducam B0381 PiVariety) — 3.0 µm pitch, 1600x1300 active.
 		self.assertEqual(reg.pixel_pitch_um, 3.0)

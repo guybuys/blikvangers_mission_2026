@@ -108,11 +108,11 @@ Per-ID fysieke afmetingen + lens- en sensor-parameters. Schema:
 		"full_res_px": [1600, 1300]
 	},
 	"tags": {
-		"26": { "size_mm": 4500, "label": "Grote missie-tag (4.5 m)" },
-		"1":  { "size_mm": 1100, "label": "Kleine missie-tag #1 (1.1 m, opgemeten)" },
-		"2":  { "size_mm": 1100 },
-		"3":  { "size_mm": 1100 },
-		"4":  { "size_mm": 1100 }
+		"26":  { "size_mm": 4500, "label": "Grote missie-tag (4.5 m)" },
+		"85":  { "size_mm": 1100, "label": "Kleine missie-tag #1 (1.1 m, opgemeten)" },
+		"235": { "size_mm": 1100 },
+		"317": { "size_mm": 1100 },
+		"536": { "size_mm": 1100 }
 	},
 	"default_size_mm": 175
 }
@@ -127,7 +127,7 @@ Per-ID fysieke afmetingen + lens- en sensor-parameters. Schema:
   resolutie.
 - **`tags`**: de IDs die we verwachten. De grote 4,5 m tag heeft ID 26;
   de vier kleine **1,1 m** tags (opgemeten op het terrein, niet de
-  oorspronkelijke schatting van 1,5 m) hebben IDs 1–4.
+  oorspronkelijke schatting van 1,5 m) hebben IDs 85, 235, 317 en 536.
 - **`default_size_mm`**: fallback voor onbekende IDs. Leerlingen printen
   tests op papier als 17,5 cm tags (`default_size_mm = 175`).
 

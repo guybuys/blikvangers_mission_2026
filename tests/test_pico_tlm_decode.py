@@ -156,14 +156,15 @@ class CrossSideRoundTripTest(unittest.TestCase):
 			utc_ms=0,
 			tags=[
 				TagDetection(tag_id=26, dx_cm=10, dy_cm=-5, dz_cm=1234, size_mm=4500),
-				TagDetection(tag_id=4, dx_cm=0, dy_cm=0, dz_cm=4567, size_mm=1100),
+				TagDetection(tag_id=85, dx_cm=0, dy_cm=0, dz_cm=4567, size_mm=1100),
 			],
 		)
 		line = pico.format_tlm_short(pico.decode_tlm(raw))
 		self.assertIn("tags=2", line)
 		# Volgorde: grootste tag (pixel-size) eerst — hier de 4.5 m missie-
-		# tag. Afstand wordt in meter gerenderd (dz_cm / 100).
-		self.assertIn("[26@12.3m 4@45.7m]", line)
+		# tag (ID 26). Afstand wordt in meter gerenderd (dz_cm / 100). ID 85
+		# is één van de vier 1.1 m missie-tags (85, 235, 317, 536).
+		self.assertIn("[26@12.3m 85@45.7m]", line)
 
 
 if __name__ == "__main__":
