@@ -1172,25 +1172,44 @@ def _handle_cam_cmd(
 
 
 def _format_gimbal_status(gimbal_loop: Optional[Any]) -> bytes:
-	"""``OK GIMBAL E=<on|off> P=<prim|cold> T=<ticks> R=<rejected> ...``.
+	"""``OK GIMBAL <state> <prim|cold> T=<ticks> R=<rej> X=<cg> Y=<cg> U=<u1>/<u2>``.
 
-	Compacte status die in één 60-byte reply past. Laat bewust de PI-tuning
-	(kx/ky/…) achterwege — dat is een debug-commando en hoeft niet elk
-	tick. ``U1/U2`` = laatste geschreven PWM (µs); ``E1/E2`` = laatste
-	LPF-fout in cg (1/100 m/s²) zodat we onder het 60 B-limiet blijven.
+	Compacte status die ook met 4-digit PWM + 4-digit cg + 5-digit ticks/
+	rej onder 60 B blijft. Eerste versie gebruikte ``E=on P=prim U1=… U2=…``
+	wat al bij 3-digit U-waarden overliep (61 B) en U2 afkapte — handige
+	reminder dat de payload-limiet hard is. ``X/Y`` zijn LPF-foutwaarden
+	in cg (1/100 m/s²) zoals in scripts/gimbal_level.py; ``U=u1/u2`` is
+	de laatst geschreven doel-PWM voor beide servo's (µs). Extreme T/R
+	worden gecapped bij 99999/9999 zodat de format ook na lange runs blijft
+	passen; de echte tellers in :class:`GimbalStatus` blijven uiteraard
+	ongetrimd.
 	"""
 	if gimbal_loop is None:
 		return _truncate(b"ERR GMB NOHW")
 	st = gimbal_loop.status()
-	ex = "NA" if st.last_err_x is None else ("%+d" % int(round(st.last_err_x * 100.0)))
-	ey = "NA" if st.last_err_y is None else ("%+d" % int(round(st.last_err_y * 100.0)))
+	# ±1999 cap houdt X/Y op max 7 tekens (X=+1999). Fysiek zit het
+	# signaal tussen ±g_max = ±1250 cg; de extra marge is voor debug-
+	# builds met aangepaste bounds. In combinatie met de 99999/9999
+	# caps op T/R past de volledige regel binnen 60 B.
+	ex = (
+		"NA"
+		if st.last_err_x is None
+		else ("%+d" % max(-1999, min(1999, int(round(st.last_err_x * 100.0)))))
+	)
+	ey = (
+		"NA"
+		if st.last_err_y is None
+		else ("%+d" % max(-1999, min(1999, int(round(st.last_err_y * 100.0)))))
+	)
 	u1 = "NA" if st.last_us1 is None else str(int(st.last_us1))
 	u2 = "NA" if st.last_us2 is None else str(int(st.last_us2))
-	msg = "OK GIMBAL E=%s P=%s T=%d R=%d EX=%s EY=%s U1=%s U2=%s" % (
+	ticks = min(99999, int(st.ticks))
+	rej = min(9999, int(st.rejected_samples))
+	msg = "OK GIMBAL %s %s T=%d R=%d X=%s Y=%s U=%s/%s" % (
 		"on" if st.enabled else "off",
 		"prim" if st.primed else "cold",
-		int(st.ticks),
-		int(st.rejected_samples),
+		ticks,
+		rej,
 		ex,
 		ey,
 		u1,

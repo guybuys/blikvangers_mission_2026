@@ -159,14 +159,54 @@ class GimbalWireTest(unittest.TestCase):
 			)
 			text = r.decode("utf-8")
 			self.assertTrue(text.startswith("OK GIMBAL "))
-			self.assertIn("E=on", text)
-			self.assertIn("P=prim", text)
+			# Compacte format: "OK GIMBAL on prim T=1 R=0 X=+50 Y=-30 U=<u1>/<u2>"
+			self.assertIn(" on ", text)
+			self.assertIn(" prim ", text)
 			self.assertIn("T=1", text)
-			self.assertIn("EX=", text)
-			self.assertIn("EY=", text)
-			self.assertIn("U1=", text)
-			self.assertIn("U2=", text)
+			self.assertIn("R=0", text)
+			self.assertIn("X=+50", text)
+			self.assertIn("Y=-30", text)
+			self.assertIn("U=", text)
+			self.assertIn("/", text)
 			self.assertLessEqual(len(r), 60)
+
+	def test_get_gimbal_fits_in_payload_under_stress(self) -> None:
+		"""Worst-case format moet onder 60 B blijven.
+
+		Regressietest voor een bug waar 3-digit PWM + 3-digit ticks de regel
+		op 61 B bracht, waardoor de laatste digit van ``U2`` wegviel en de
+		operator dacht dat de gimbal naar de ondergrens ging. We forceren
+		hier grote waardes (caps op T/R/X/Y) via de ``status()``-mock en
+		clamp-maxen (U1/U2) om zeker te zijn dat de regel binnen de payload
+		past, ook na lange runs.
+		"""
+		with tempfile.TemporaryDirectory() as td:
+			servo = _make_servo(Path(td))
+			loop = _make_loop(servo)
+			loop.enable()
+			# Zet interne tellers en laatste waarden op hun max-display-
+			# bereik om de pathologische format te produceren. We gebruiken
+			# dunder-access omdat het niet door een echte tick-sequentie
+			# haalbaar is om alles gelijktijdig te maxen.
+			loop._ticks = 10 ** 6
+			loop._rejected_samples = 10 ** 5
+			loop._last_err_x = 50.0  # cap bij 1999 cg
+			loop._last_err_y = -50.0
+			loop._cur_us1 = 2500
+			loop._cur_us2 = 2500
+			state = RadioRuntimeState()
+			r = handle_wire_line(
+				_fake_rfm(),
+				state,
+				"GET GIMBAL",
+				servo=servo,
+				gimbal_loop=loop,
+			)
+			self.assertLessEqual(len(r), 60)
+			text = r.decode("utf-8")
+			self.assertIn("T=99999", text)
+			self.assertIn("R=9999", text)
+			self.assertIn("U=2500/2500", text)
 
 	def test_gimbal_bad_subcommand(self) -> None:
 		with tempfile.TemporaryDirectory() as td:

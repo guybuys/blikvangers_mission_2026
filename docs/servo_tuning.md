@@ -241,7 +241,7 @@ sample. Hij zet pas PWM als:
 | `GIMBAL ON` | CONFIG, TEST, MISSION | Zet closed-loop aan. Reset de I-term zodat een nieuwe sessie schoon vertrekt. |
 | `GIMBAL OFF` | CONFIG, TEST, MISSION | Zet closed-loop uit. Laatste geschreven PWM blijft staan (rail beheert de state-policy). |
 | `GIMBAL HOME` | CONFIG | Rail aan + beide servo's naar `center_us` + reset rate-limit-vertrekpunt in de loop. `ERR GMB BUSY` buiten CONFIG. |
-| `GET GIMBAL` | overal | `OK GIMBAL E=<on\|off> P=<prim\|cold> T=<ticks> R=<rejected> EX=<cg> EY=<cg> U1=<µs> U2=<µs>`. `EX/EY` = laatste LPF-fout in 1/100 m/s² (cg) om onder 60 B te passen. |
+| `GET GIMBAL` | overal | `OK GIMBAL <on\|off> <prim\|cold> T=<ticks> R=<rej> X=<cg> Y=<cg> U=<u1>/<u2>`. `X/Y` = laatste LPF-fout in 1/100 m/s² (cg), `U` = laatste PWM (µs). Compact zodat 4-digit PWM + 5-digit ticks binnen 60 B passen. |
 
 Reply-conventie: `OK GIMBAL …` / `ERR GMB …` (3-letter code zodat alles
 in de 60 B RFM69-payload past). `ERR GMB NOHW` betekent ofwel geen
@@ -364,15 +364,15 @@ BS> !servo home
 BS> !gimbal on
     → OK GIMBAL ON
 BS> !gimbal status
-    → OK GIMBAL E=on P=cold T=0 R=0 EX=NA EY=NA U1=1500 U2=1600
+    → OK GIMBAL on cold T=0 R=0 X=NA Y=NA U=1500/1600
 #   P=cold = LPF nog niet gezaaid; wacht 1-2 sec. na !gimbal on.
 
 # 5. Kantel de cansat LANGZAAM in één as — bv. pitch omhoog ~15°.
 #    Houd hem gekanteld, doe telkens:
 BS> !gimbal status
-#   Verwacht: EX of EY is niet-nul (in cg = 1/100 m/s²; 15° ≈ 250 cg),
-#   en U1 of U2 schuift weg van center richting de "compenserende"
-#   kant (de servo probeert de camera waterpas te houden).
+#   Verwacht: X of Y is niet-nul (in cg = 1/100 m/s²; 15° ≈ 250 cg),
+#   en U1 of U2 (in "U=u1/u2") schuift weg van center richting de
+#   "compenserende" kant — de servo probeert de camera waterpas te houden.
 ```
 
 **Diagnose-matrix** bij stap 5:
@@ -380,7 +380,7 @@ BS> !gimbal status
 | Wat je ziet | Interpretatie | Fix |
 |---|---|---|
 | `T` stilstaand op 0, `R` groeit | Sensor levert samples buiten `g_min..g_max` of voortdurend spikes | `!servo disable`, check BNO055-bedrading / sensor-mount |
-| `EX`/`EY` beweegt, `U1`/`U2` niet | `max_us_step=0`, of clamp (cal.min/max) blokkeert | Check `--gimbal-max-us-step` > 0; kalibreer range breder |
+| `X`/`Y` beweegt, `U=u1/u2` niet | `max_us_step=0`, of clamp (cal.min/max) blokkeert | Check `--gimbal-max-us-step` > 0; kalibreer range breder |
 | Servo beweegt de **juiste** fysieke as maar naar de **verkeerde kant** | Sign is omgekeerd (gimbal *versterkt* de kanteling i.p.v. compenseren) | Negatieve `--gimbal-kx` (of `-ky`) in de service-override |
 | Pitch-kanteling stuurt de **roll-servo** i.p.v. pitch-servo (of omgekeerd) | As-mapping is geswapped | `--gimbal-swap-axes` aanzetten (1-op-1 zwak dan `kx`↔`ky`) |
 | Beide bovenstaande tegelijk (verkeerde as én verkeerde kant) | Waarschijnlijk 1 servo mechanisch omgekeerd gemonteerd + PWM swap | Eerst fysiek checken; beide software-fixes combineren kan tot verwarring leiden |
