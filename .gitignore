@@ -42,6 +42,10 @@ config/radio_runtime.json
 config/gimbal/servo_calibration.json
 cansat_logs/
 photos/
+# Lokale spiegel van /home/icw/photos/ op de Zero, gevuld door
+# scripts/fetch_zero_photos.sh. Per sessie archiveren onder archive/,
+# nooit in git (grote binaries + per-hardware data).
+zero_photos/
 
 # Lokale analyse-output van mission/test-CSV's en plots (decode_logs.py,
 # matplotlib, gnuplot ...). Dit is dev-werkmateriaal dat per sessie verschilt
