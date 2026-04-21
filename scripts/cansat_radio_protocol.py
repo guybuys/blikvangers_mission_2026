@@ -436,13 +436,13 @@ def main() -> int:
 	from cansat_hw.radio import RFM69
 	from cansat_hw.radio.wire_protocol import (
 		RadioRuntimeState,
-		TEST_MODE_TLM_INTERVAL_S,
 		apply_mode_iir,
 		build_telemetry_packet,
 		handle_wire_line,
 		maybe_advance_flight_state,
 		test_mode_advance_tlm,
 		test_mode_end,
+		tlm_interval_for,
 		test_mode_tick,
 	)
 	from cansat_hw.sensors.sampler import SensorSampler
@@ -965,12 +965,18 @@ def main() -> int:
 					)
 				elif not ok_tlm:
 					print("WARN: TLM TX failed (radio timeout)", file=sys.stderr)
-				# Kies interval per mode: TEST = vaste 1 Hz dry-run cadence,
-				# MISSION = CLI-configureerbaar (default 1.0 s).
-				interval = (
-					float(args.mission_tlm_interval)
-					if state.mode == "MISSION"
-					else TEST_MODE_TLM_INTERVAL_S
+				# Interval per (mode, flight_state) — zie tlm_interval_for:
+				#   TEST              → 0.2 s (5 Hz, matcht sampler)
+				#   MISSION/DEPLOYED  → 0.2 s (descent: max data)
+				#   MISSION/ASCENT    → 1.0 s (rustige stijging)
+				#   MISSION/PAD_IDLE  → 5.0 s (beacon; wacht op launch)
+				#   MISSION/LANDED    → 5.0 s (beacon voor retrieve)
+				# ``--mission-tlm-interval`` is de fallback voor unknown
+				# substates en als operator-override voor tooling.
+				interval = tlm_interval_for(
+					state.mode,
+					state.flight_state,
+					mission_default_s=float(args.mission_tlm_interval),
 				)
 				test_mode_advance_tlm(state, interval_s=interval)
 

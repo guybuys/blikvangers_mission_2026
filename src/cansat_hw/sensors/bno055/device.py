@@ -158,6 +158,18 @@ class BNO055:
 		x, y, z = struct.unpack("<hhh", raw)
 		return x / 100.0, y / 100.0, z / 100.0
 
+	def read_gyro(self) -> Tuple[float, float, float]:
+		"""Rotatiesnelheid in °/s: ``(gx, gy, gz)``.
+
+		BNO055 schaalt op 16 LSB/°/s in de default degree-unit (UNIT_SEL na
+		reset). Bereik in NDOF is ±2000°/s, ruim voldoende voor een vallende
+		CanSat. Voor gyro-calibratie: laat de sensor 5 s onbeweeglijk staan,
+		``gyro_cal`` gaat dan naar 3.
+		"""
+		raw = self._read_block(BNO055_GYRO_DATA_X_LSB, 6)
+		x, y, z = struct.unpack("<hhh", raw)
+		return x / 16.0, y / 16.0, z / 16.0
+
 	def read_gravity(self) -> Tuple[float, float, float]:
 		"""Gravity-vector m/s²."""
 		raw = self._read_block(BNO055_GRAVITY_DATA_X_LSB, 6)

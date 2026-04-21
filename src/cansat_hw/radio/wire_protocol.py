@@ -101,14 +101,31 @@ ALT_PRIME_MAX = 32
 TEST_MODE_DEFAULT_S = 10.0
 TEST_MODE_MIN_S = 2.0
 TEST_MODE_MAX_S = 60.0
-TEST_MODE_TLM_INTERVAL_S = 1.0
+# TEST + DEPLOYED zijn korte, actieve fases waar we álle data willen: elke
+# sampler-tick (5 Hz) wordt een TLM-frame gezonden én gelogd. Geen power-save,
+# geen CPU-optimalisatie — puur data-vangen. De radio TX is fire-and-forget
+# (zie rfm69.py send(), geen ACK-wait), dus 5 Hz past binnen de 0.2 s
+# loop-tick zonder backpressure.
+TEST_MODE_TLM_INTERVAL_S = 0.2
 
-# MISSION-TLM-loop: standaard tempo waarmee de Zero ongevraagd telemetrie naar
-# het base station pusht zodra MISSION actief is. Lagere getallen = meer data
-# (en hoger CPU/radio-gebruik); hoger = stiller. Configureerbaar via de
-# main-loop (CLI ``--mission-tlm-interval``). De TLM-loop is óók de motor
-# achter de flight-state-machine: zonder reads bewegen ASCENT/DEPLOY/LANDED
-# nooit. Geen apart commando om dit te wijzigen — keuze maken bij boot.
+# MISSION-TLM-loop per substate. De rate is gekoppeld aan wat we fysiek aan
+# het meten zijn:
+#
+#   PAD_IDLE  — wachten op launch. Beacon "ik leef nog" voor de operator;
+#               batterij sparen omdat we hier mogelijk 10+ minuten hangen.
+#   ASCENT    — stijging, voorspelbaar, rustig. 1 Hz is ruim genoeg voor de
+#               state-machine-triggers en voor trace-doeleinden.
+#   DEPLOYED  — descent; hier gebeurt alles dat telt (pieken, tags, gimbal).
+#               Matcht TEST: max data-budget, 5 Hz, fire-and-forget.
+#   LANDED    — retrieve-fase. Beacon voor peilen, geen sensor-scan meer
+#               nodig; batterij rekt de vind-tijd op.
+#
+# De CLI ``--mission-tlm-interval`` geldt als **fallback** voor onbekende
+# substates en als algemeen default voor tooling/tests.
+MISSION_TLM_INTERVAL_PAD_IDLE_S = 5.0
+MISSION_TLM_INTERVAL_ASCENT_S = 1.0
+MISSION_TLM_INTERVAL_DEPLOYED_S = 0.2
+MISSION_TLM_INTERVAL_LANDED_S = 5.0
 MISSION_MODE_TLM_INTERVAL_S = 1.0
 
 # ISA barometer-constante (h_m ≈ 44330 * (1 - (p/p0)^0.1903)).
@@ -692,6 +709,9 @@ def build_telemetry_packet(
 	ax_g: Optional[float] = None
 	ay_g: Optional[float] = None
 	az_g: Optional[float] = None
+	gx_dps: Optional[float] = None
+	gy_dps: Optional[float] = None
+	gz_dps: Optional[float] = None
 	sys_cal: Optional[int] = None
 	gyro_cal: Optional[int] = None
 	accel_cal: Optional[int] = None
@@ -709,6 +729,9 @@ def build_telemetry_packet(
 		ax_g = getattr(snapshot, "ax_g", None)
 		ay_g = getattr(snapshot, "ay_g", None)
 		az_g = getattr(snapshot, "az_g", None)
+		gx_dps = getattr(snapshot, "gx_dps", None)
+		gy_dps = getattr(snapshot, "gy_dps", None)
+		gz_dps = getattr(snapshot, "gz_dps", None)
 		sys_cal = getattr(snapshot, "sys_cal", None)
 		gyro_cal = getattr(snapshot, "gyro_cal", None)
 		accel_cal = getattr(snapshot, "accel_cal", None)
@@ -743,6 +766,17 @@ def build_telemetry_packet(
 				az_g = float(az_ms2) / _G_MS2
 			except Exception:  # noqa: BLE001
 				ax_g = ay_g = az_g = None
+			# Gyro alleen als de driver het kan (oudere BNO-drivers missen
+			# ``read_gyro()``; dan sentinel schrijven via None).
+			read_gyro = getattr(bno055, "read_gyro", None)
+			if read_gyro is not None:
+				try:
+					gx, gy, gz = read_gyro()
+					gx_dps = float(gx)
+					gy_dps = float(gy)
+					gz_dps = float(gz)
+				except Exception:  # noqa: BLE001
+					gx_dps = gy_dps = gz_dps = None
 			try:
 				cs = bno055.calibration_status()
 				sys_cal = int(cs[0])
@@ -780,10 +814,9 @@ def build_telemetry_packet(
 		ax_g=ax_g,
 		ay_g=ay_g,
 		az_g=az_g,
-		# Gyro-rate is (nog) niet uit de BNO-driver te halen; reserveerd voor later.
-		gx_dps=None,
-		gy_dps=None,
-		gz_dps=None,
+		gx_dps=gx_dps,
+		gy_dps=gy_dps,
+		gz_dps=gz_dps,
 		sys_cal=sys_cal,
 		gyro_cal=gyro_cal,
 		accel_cal=accel_cal,
@@ -842,6 +875,40 @@ def test_mode_advance_tlm(
 	if now_monotonic is None:
 		now_monotonic = time_mod.monotonic()
 	state.test_next_tlm_monotonic = now_monotonic + float(interval_s)
+
+
+def tlm_interval_for(
+	mode: str,
+	flight_state: int,
+	*,
+	mission_default_s: float = MISSION_MODE_TLM_INTERVAL_S,
+) -> float:
+	"""TLM-interval (s) afgestemd op ``(mode, flight_state)``.
+
+	Zie de module-docstring-sectie rond ``MISSION_TLM_INTERVAL_*`` voor de
+	keuzes per substate (PAD_IDLE/LANDED = beacon, ASCENT = 1 Hz, DEPLOYED
+	en TEST = 5 Hz). ``mission_default_s`` is de CLI-fallback
+	(``--mission-tlm-interval``) die in MISSION geldt voor onbekende
+	substates of als de operator expliciet wil overrulen.
+
+	De functie is pure lookup zonder I/O: eenvoudig unit-test-baar en
+	hergebruikt tussen main loop en wire-protocol tests.
+	"""
+	mode_u = (mode or "").upper()
+	if mode_u == "TEST":
+		return TEST_MODE_TLM_INTERVAL_S
+	if mode_u != "MISSION":
+		return float(mission_default_s)
+	fs = int(flight_state)
+	if fs == STATE_DEPLOYED:
+		return MISSION_TLM_INTERVAL_DEPLOYED_S
+	if fs == STATE_ASCENT:
+		return MISSION_TLM_INTERVAL_ASCENT_S
+	if fs == STATE_PAD_IDLE:
+		return MISSION_TLM_INTERVAL_PAD_IDLE_S
+	if fs == STATE_LANDED:
+		return MISSION_TLM_INTERVAL_LANDED_S
+	return float(mission_default_s)
 
 
 def _clear_session_bookkeeping(state: RadioRuntimeState) -> None:

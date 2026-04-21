@@ -280,6 +280,7 @@ _CSV_HEADER = (
 	"file,utc_iso,utc_s,utc_ms,seq,mode,state,"
 	"alt_m,pressure_hpa,temp_c,heading_deg,roll_deg,pitch_deg,"
 	"ax_g,ay_g,az_g,accel_mag_g,"
+	"gx_dps,gy_dps,gz_dps,"
 	"sys_cal,gyro_cal,accel_cal,mag_cal,"
 	"tags"
 )
@@ -332,6 +333,9 @@ def _print_csv(paths: List[Path]) -> int:
 				_csv_field(f.ay_g),
 				_csv_field(f.az_g),
 				_csv_field(_accel_mag(f)),
+				_csv_field(f.gx_dps),
+				_csv_field(f.gy_dps),
+				_csv_field(f.gz_dps),
 				_csv_field(f.sys_cal),
 				_csv_field(f.gyro_cal),
 				_csv_field(f.accel_cal),

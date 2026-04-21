@@ -109,6 +109,13 @@ class SensorSnapshot:
 	# onafhankelijk).
 	accel_mag_g: Optional[float] = None
 
+	# BNO055 rotatiesnelheid (°/s). Vult zich alleen als de driver
+	# ``read_gyro()`` biedt; anders blijven de waardes ``None`` zodat de
+	# TLM-codec sentinels (INT16_NA) schrijft.
+	gx_dps: Optional[float] = None
+	gy_dps: Optional[float] = None
+	gz_dps: Optional[float] = None
+
 	# BNO055 calibration counters (0–3).
 	sys_cal: Optional[int] = None
 	gyro_cal: Optional[int] = None
@@ -216,6 +223,19 @@ class SensorSampler:
 				snap.accel_mag_g = _safe_norm(snap.ax_g, snap.ay_g, snap.az_g)
 			except Exception:  # noqa: BLE001
 				snap.bno_failures += 1
+
+			# Gyro is een aparte I²C-transactie. We gebruiken ``getattr`` zodat
+			# oudere BNO-drivers zonder ``read_gyro()`` niet crashen; hun
+			# snapshots houden dan gewoon ``gx_dps == None`` aan.
+			read_gyro = getattr(self.bno055, "read_gyro", None)
+			if read_gyro is not None:
+				try:
+					gx, gy, gz = read_gyro()
+					snap.gx_dps = float(gx)
+					snap.gy_dps = float(gy)
+					snap.gz_dps = float(gz)
+				except Exception:  # noqa: BLE001
+					snap.bno_failures += 1
 
 			try:
 				cs = self.bno055.calibration_status()

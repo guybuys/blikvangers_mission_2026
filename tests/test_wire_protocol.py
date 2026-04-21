@@ -655,6 +655,73 @@ class TestModeTickTest(unittest.TestCase):
 		self.assertIsNone(st.test_dest_node)
 
 
+class TlmIntervalForTest(unittest.TestCase):
+	"""Per-(mode, substate) TLM-rate lookup.
+
+	De volledige tabel (TEST + MISSION substates) zit in één helper zodat
+	zowel de main loop als tooling dezelfde keuzes maakt. Deze tests fixeren
+	de keuzes: TEST + MISSION/DEPLOYED op 5 Hz, ASCENT op 1 Hz,
+	PAD_IDLE/LANDED als beacon.
+	"""
+
+	def test_test_mode_is_five_hz(self) -> None:
+		from cansat_hw.radio.wire_protocol import (
+			TEST_MODE_TLM_INTERVAL_S,
+			tlm_interval_for,
+		)
+		from cansat_hw.telemetry.codec import STATE_DEPLOYED
+
+		self.assertEqual(TEST_MODE_TLM_INTERVAL_S, 0.2)
+		self.assertEqual(tlm_interval_for("TEST", STATE_DEPLOYED), 0.2)
+
+	def test_mission_deployed_matches_test(self) -> None:
+		from cansat_hw.radio.wire_protocol import tlm_interval_for
+		from cansat_hw.telemetry.codec import STATE_DEPLOYED
+
+		# DEPLOYED is de data-hongerige descent-fase: zelfde rate als TEST.
+		self.assertEqual(tlm_interval_for("MISSION", STATE_DEPLOYED), 0.2)
+
+	def test_mission_ascent_is_one_hz(self) -> None:
+		from cansat_hw.radio.wire_protocol import tlm_interval_for
+		from cansat_hw.telemetry.codec import STATE_ASCENT
+
+		self.assertEqual(tlm_interval_for("MISSION", STATE_ASCENT), 1.0)
+
+	def test_mission_pad_idle_and_landed_are_beacon(self) -> None:
+		from cansat_hw.radio.wire_protocol import tlm_interval_for
+		from cansat_hw.telemetry.codec import STATE_LANDED, STATE_PAD_IDLE
+
+		# Beide "wachtfases" gebruiken een trage beacon — 5 s is ruim
+		# binnen 433-MHz duty cycle én houdt de LiPo in leven voor de
+		# retrieve-fase.
+		self.assertEqual(tlm_interval_for("MISSION", STATE_PAD_IDLE), 5.0)
+		self.assertEqual(tlm_interval_for("MISSION", STATE_LANDED), 5.0)
+
+	def test_unknown_mission_state_falls_back_to_cli_default(self) -> None:
+		from cansat_hw.radio.wire_protocol import tlm_interval_for
+		from cansat_hw.telemetry.codec import STATE_NONE
+
+		# MISSION + STATE_NONE mag in principe niet voorkomen, maar als
+		# dat ooit gebeurt moet de operator-override (via CLI) gelden i.p.v.
+		# een silent 5 Hz-burst die duty-cycle-limieten overschrijdt.
+		self.assertEqual(
+			tlm_interval_for("MISSION", STATE_NONE, mission_default_s=2.5),
+			2.5,
+		)
+
+	def test_non_config_mode_returns_default(self) -> None:
+		from cansat_hw.radio.wire_protocol import tlm_interval_for
+		from cansat_hw.telemetry.codec import STATE_NONE
+
+		# CONFIG heeft geen autonome TLM-loop, maar als iets per ongeluk
+		# deze helper daar aanroept mag er geen KeyError komen — return
+		# de fallback en laat de caller beslissen of er gezonden wordt.
+		self.assertEqual(
+			tlm_interval_for("CONFIG", STATE_NONE, mission_default_s=3.0),
+			3.0,
+		)
+
+
 class TelemetryPacketTest(unittest.TestCase):
 	def test_binary_frame_is_exact_size_and_first_byte(self) -> None:
 		from cansat_hw.radio.wire_protocol import (
