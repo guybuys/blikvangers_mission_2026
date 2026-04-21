@@ -11,7 +11,7 @@
 		"_comment_sensor": "Arducam B0381 PiVariety 2MP global-shutter mono (NoIR). 1600x1300 actieve array, 3.0 µm pixel pitch. Met 25 mm lens => focal_length_px = 25 * 1000 / 3.0 ≈ 8333 px op volle resolutie."
 	},
 	"tags": {
-		"26":  { "size_mm": 4000, "label": "Grote missie-tag (4.5 m)" },
+		"26":  { "size_mm": 4000, "label": "Grote missie-tag (4.0 m, opgemeten)" },
 		"85":  { "size_mm": 1100, "label": "Kleine missie-tag #1 (1.1 m, opgemeten)" },
 		"235": { "size_mm": 1100, "label": "Kleine missie-tag #2 (1.1 m, opgemeten)" },
 		"317": { "size_mm": 1100, "label": "Kleine missie-tag #3 (1.1 m, opgemeten)" },
