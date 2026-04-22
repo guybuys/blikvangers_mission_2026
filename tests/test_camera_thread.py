@@ -250,6 +250,39 @@ class TestCameraThread(unittest.TestCase):
 			self.assertEqual(cam.stats()["saved"], 0)
 			self.assertEqual(cam.stats()["save_errors"], 2)
 
+	def test_exposure_bracket_rotates_set_controls(self) -> None:
+		from unittest.mock import MagicMock
+
+		calls: List[dict] = []
+		pi = MagicMock()
+
+		def capture():
+			return object(), (64, 64)
+
+		def on_set_controls(ctrl):
+			calls.append(dict(ctrl))
+
+		pi.set_controls.side_effect = on_set_controls
+
+		det = FakeDetector([[(1, _square_corners(32.0, 32.0, 10.0))]] * 4)
+		cam = CameraThread(
+			buffer=self.buf,
+			registry=self.reg,
+			capture_fn=capture,
+			preprocess_fn=_identity_preprocess,
+			detector=det,
+			target_fps=100.0,
+			picam2=pi,
+			exposure_bracket_us=(8000, 12000),
+			exposure_bracket_gain=1.5,
+		)
+		cam.run_once()
+		cam.run_once()
+		self.assertGreaterEqual(len(calls), 2)
+		self.assertEqual(calls[0].get("ExposureTime"), 8000)
+		self.assertEqual(calls[1].get("ExposureTime"), 12000)
+		self.assertFalse(calls[0].get("AeEnable", True))
+
 	def test_inactive_pauses_loop(self) -> None:
 		"""Inactive thread moet niet tick'en."""
 

@@ -330,10 +330,14 @@ class GimbalLoop:
 
 		if g is None:
 			self._rejected_samples += 1
+			if now_monotonic is not None:
+				self._last_monotonic = float(now_monotonic)
 			return None
 		gx, gy, gz = g
 		if not (math.isfinite(gx) and math.isfinite(gy) and math.isfinite(gz)):
 			self._rejected_samples += 1
+			if now_monotonic is not None:
+				self._last_monotonic = float(now_monotonic)
 			return None
 
 		# Norm-check: weiger samples buiten het plausibele bereik (sensor-
@@ -343,6 +347,8 @@ class GimbalLoop:
 		gn = math.sqrt(gx * gx + gy * gy + gz * gz)
 		if gn < self.g_min or gn > self.g_max:
 			self._rejected_samples += 1
+			if now_monotonic is not None:
+				self._last_monotonic = float(now_monotonic)
 			return None
 
 		# Spike-detectie t.o.v. vorig raw sample. Eerste sample: niets te
@@ -365,6 +371,13 @@ class GimbalLoop:
 				self._last_raw_gy = gy
 				self._last_raw_gz = gz
 				self._rejected_samples += 1
+				if now_monotonic is not None:
+					# Zonder deze tick verzet de volgende geslaagde sample
+					# ``dt`` ~ N×(main-loopperiode) — I-term springt, zichtbaar
+					# als ~1 Hz “schokken” in !test/5 Hz-lus. Hoofdlus tikt
+					# wél elke 0,2 s; we verwerpen alleen de IMU, niet de
+					# tijdbasis voor ∫e·dt.
+					self._last_monotonic = float(now_monotonic)
 				return None
 
 		# Accepteer sample.

@@ -30,6 +30,9 @@ python scripts/camera/descent_telemetry.py --frames 100 --photo-dir ~/photos --l
 # Exposure-bracket (microseconden, roteert per foto):
 python scripts/camera/descent_telemetry.py --frames 200 --bracket-us 8000,12000,20000 --photo-dir ~/photos --log ~/logs/descent.csv
 
+# Zelfde bracket in de live radio-service (DEPLOYED + ``SET MODE TEST``):
+#   --camera-bracket-us 8000,12000,20000 --camera-bracket-gain 2
+
 # Pinhole-modus met de mission tag-registry (aanbevolen voor 2026 — corrigeert
 # distance per tag-ID, gebruikt dezelfde formule als de live radio-pijplijn):
 python scripts/camera/descent_telemetry.py --frames 100 \

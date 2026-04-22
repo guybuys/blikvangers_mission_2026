@@ -27,7 +27,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 os.environ.setdefault("GPIOZERO_PIN_FACTORY", "rpigpio")
 
@@ -78,6 +78,21 @@ def _load_persisted_freq(path: Path) -> Optional[float]:
 		return float(data.get("freq_mhz"))
 	except (TypeError, ValueError):
 		return None
+
+
+def _parse_camera_bracket_us(s: str) -> Tuple[int, ...]:
+	"""Komma-gescheiden sluitertijden µs → tuple (leeg = auto exposure)."""
+
+	out: list[int] = []
+	for part in (s or "").split(","):
+		part = part.strip()
+		if not part:
+			continue
+		try:
+			out.append(int(part, 10))
+		except ValueError:
+			continue
+	return tuple(out)
 
 
 def _save_persisted_freq(path: Path, mhz: float) -> Optional[str]:
@@ -332,8 +347,9 @@ def main() -> int:
 		"--gimbal-max-us-step",
 		type=int,
 		default=20,
-		help="Max µs per regeltick (≈5 Hz in MISSION/TEST → 100 µs/s). Verhogen "
-		"bij trage reactie; verlagen als de gimbal gaat tikken.",
+		help="Max µs per regeltick t.o.v. vorige PWM (na clamp). Verhogen bij "
+		"tragere aanvoel; verlagen als de gimbal tikt. Lus-cadans hangt af van "
+		"mode (DEPLOYED+gimbal typisch ~20 Hz).",
 	)
 	p.add_argument(
 		"--gimbal-swap-axes",
@@ -372,6 +388,21 @@ def main() -> int:
 		help="Frames-per-seconde bovengrens voor de camera-thread. Default 7 Hz.",
 	)
 	p.add_argument(
+		"--camera-bracket-us",
+		type=str,
+		default="",
+		metavar="LIST",
+		help="DEPLOYED/TEST: komma-gescheiden ExposureTime (µs), roteert per frame "
+		"(zelfde idee als scripts/camera/descent_telemetry.py --bracket-us). "
+		"Leeg = auto exposure.",
+	)
+	p.add_argument(
+		"--camera-bracket-gain",
+		type=float,
+		default=2.0,
+		help="AnalogueGain bij --camera-bracket-us (vaste exposure). Default 2.",
+	)
+	p.add_argument(
 		"--camera-resolution",
 		type=str,
 		default="1600x1300",
@@ -392,7 +423,8 @@ def main() -> int:
 		metavar="N",
 		help="Sla tijdens DEPLOYED elke N-de frame als JPEG op in --photo-dir "
 		"(fallback voor detectie-debug als geen tag in TLM verschijnt). "
-		"Bij --camera-fps 7 Hz geeft N=7 ≈ 1 foto/seconde; 0 = uit. Default 7.",
+		"Interval op schijf ≈ N / camera-fps (bv. fps=7, N=7 → ~1 s tussen "
+		"bestanden; N=2 → ~0,29 s). 0 = uit. Default 7.",
 	)
 	args = p.parse_args()
 	if args.mission_tlm_interval < 0.1:
@@ -780,6 +812,7 @@ def main() -> int:
 				except CameraUnavailable:
 					jpeg_save_fn = None
 				save_every = max(0, int(args.deploy_save_every_n))
+				bracket_us = _parse_camera_bracket_us(args.camera_bracket_us)
 				camera_thread = CameraThread(
 					buffer=tag_buffer,
 					registry=tag_registry_obj,
@@ -791,6 +824,9 @@ def main() -> int:
 					save_every_n_frames=save_every if jpeg_save_fn is not None else 0,
 					save_dir=photo_dir_path if jpeg_save_fn is not None else None,
 					save_fn=jpeg_save_fn,
+					picam2=picam2_handle if bracket_us else None,
+					exposure_bracket_us=bracket_us,
+					exposure_bracket_gain=float(args.camera_bracket_gain),
 				)
 				camera_thread.start()
 				# Services-container voor synchrone CONFIG-commando's
@@ -807,9 +843,15 @@ def main() -> int:
 					detect_width=int(args.camera_detect_width),
 					save_fn=jpeg_save_fn,
 				)
+				_bracket_s = (
+					"bracket=%s µs gain=%.2f"
+					% (",".join(str(x) for x in bracket_us), float(args.camera_bracket_gain))
+					if bracket_us
+					else "bracket=auto"
+				)
 				print(
 					"Camera-thread actief — %dx%d capture, %d px detect, %.1f fps cap, "
-					"family=%s, save-every=%d (%s)"
+					"family=%s, save-every=%d (%s), %s"
 					% (
 						cam_w,
 						cam_h,
@@ -818,6 +860,7 @@ def main() -> int:
 						args.camera_tag_families,
 						save_every,
 						"uit" if jpeg_save_fn is None or save_every == 0 else photo_dir_path,
+						_bracket_s,
 					)
 				)
 			except CameraUnavailable as e:
@@ -960,8 +1003,9 @@ def main() -> int:
 			# autonome TLM-reads beweegt PAD_IDLE → ASCENT → DEPLOYED → LANDED
 			# nooit (ook niet als de Pico tijdelijk uit range is).
 			# Eerst de sampler tikken: 1 BME-read + 1 BNO-read per iteratie.
-			# In MISSION/TEST is de loop ~5 Hz (rx_timeout 0.2s); in CONFIG
-			# ~1 Hz (args.poll). Dat is voldoende voor de IMU-rolling-stats —
+			# In MISSION/TEST is de loop typisch ~5 Hz (rx_timeout 0.2s), in
+			# DEPLOYED + gimbal ~20 Hz (0.05s); in CONFIG ~1 Hz (args.poll) tenzij
+			# gimbal-diagnose 0.2s forceert. IMU-rolling-stats —
 			# de echte IMU-triggers komen pas na lift-off in MISSION.
 			sampler.tick(ground_hpa=state.ground_hpa)
 			# Multi-trigger evaluatie elke tick (≈5 Hz in MISSION/TEST,
@@ -1106,18 +1150,23 @@ def main() -> int:
 			# Korte receive-timeout in TEST/MISSION zodat de TLM-scheduler
 			# responsief blijft (anders zou args.poll—vaak 1+ s—de cadence dempen).
 			rx_timeout = 0.2 if state.mode in ("TEST", "MISSION") else args.poll
-			# Gimbal-diagnose in CONFIG: wanneer de loop actief is én de
-			# rail aan staat, willen we ook daar op ~5 Hz tikken. Anders
-			# zou de regelaar in CONFIG maar args.poll-keer per seconde
-			# updaten (≈1 Hz), wat bij ``--gimbal-max-us-step 20`` = 20
-			# µs/s oplevert — veel te traag om visueel kantel-diagnose
-			# te doen.
-			if (
+			# In DEPLOYED + actieve gimbal: main-loop ~20 Hz zodat ``tick()`` en
+			# ``sampler.tick()`` vlotter lopen. TLM blijft op eigen monotonic-
+			# deadline (0.2 s in DEPLOYED/TEST); alleen de ``receive()``-wacht
+			# wordt korter. CONFIG-diagnose blijft op max 5 Hz (0.2 s).
+			_gimbal_hot = (
 				gimbal_loop is not None
 				and gimbal_loop.enabled
 				and servo is not None
 				and servo.rail_on
+			)
+			if (
+				_gimbal_hot
+				and state.mode in ("TEST", "MISSION")
+				and int(state.flight_state) == int(_STATE_DEPLOYED)
 			):
+				rx_timeout = min(rx_timeout, 0.05)
+			elif _gimbal_hot:
 				rx_timeout = min(rx_timeout, 0.2)
 			# with_header=True: afzender = byte 1 voor reply destination
 			# with_ack=False: geen RadioHead-ACK vóór onze tekstantwoord

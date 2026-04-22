@@ -23,6 +23,22 @@ herkend is en hoe ver hij weg is. In alle andere flight-states
 (`PAD_IDLE`, `ASCENT`, `LANDED`) **staat de camera-thread stil** — de
 spec schrijft voor dat we daar CPU + warmte sparen.
 
+## Exposure-bracket (afwisselende sluitertijd)
+
+De bench-tool [`scripts/camera/descent_telemetry.py`](../scripts/camera/descent_telemetry.py)
+ondersteunt `--bracket-us` (komma-gescheiden sluitertijden in **µs**, roteert
+per frame) en `--analog-gain`. Dezelfde tactiek is beschikbaar in de
+**radio-service** via `scripts/cansat_radio_protocol.py`:
+
+- `--camera-bracket-us` — zelfde lijst als `--bracket-us` (bv. `8000,12000,20000`).
+- `--camera-bracket-gain` — vaste `AnalogueGain` bij bracket (default `2.0`).
+
+Lege `--camera-bracket-us` laat **auto exposure** (`AeEnable`) staan. Bracket
+draait in de `CameraThread` vóór elke capture; geldt zowel in echte
+`MISSION/DEPLOYED` als in **`SET MODE TEST`** (TEST bootst DEPLOYED na —
+zelfde camera-policy). JPEG-saves blijven afhankelijk van
+`--deploy-save-every-n` (niet elke frame hoeft naar schijf).
+
 ## Architectuur
 
 ```

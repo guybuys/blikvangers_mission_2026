@@ -102,6 +102,12 @@ class CameraThread:
 	save_dir: Optional[Path] = None
 	save_fn: Optional[SaveFn] = None
 	save_filename_prefix: str = "deploy_"
+	# Optioneel: Picamera2-instance + vaste exposure-rotatie (µs), zelfde idee
+	# als ``scripts/camera/descent_telemetry.py --bracket-us``. Leeg =
+	# auto-exposure (geen extra set_controls).
+	picam2: Optional[Any] = None
+	exposure_bracket_us: Tuple[int, ...] = ()
+	exposure_bracket_gain: float = 2.0
 
 	# -- interne state (niet door aanroeper instellen) -----------------------
 	_active: bool = field(default=False, init=False)
@@ -206,9 +212,33 @@ class CameraThread:
 							return
 						self._cond.wait(timeout=sleep_for)
 
+	def _apply_exposure_bracket(self) -> None:
+		"""Zet vaste exposure vóór capture; faal stil (libcamera/sensor verschillen)."""
+
+		p = self.picam2
+		br = self.exposure_bracket_us
+		if p is None or not br:
+			return
+		try:
+			exp = int(br[int(self._frames) % len(br)])
+			p.set_controls(
+				{
+					"AeEnable": False,
+					"AwbEnable": False,
+					"ExposureTime": exp,
+					"AnalogueGain": float(self.exposure_bracket_gain),
+				}
+			)
+		except Exception:
+			try:
+				p.set_controls({"AeEnable": True})
+			except Exception:
+				pass
+
 	def _run_once(self) -> None:
 		"""Eén capture + detect + buffer.update. Publiek voor tests."""
 
+		self._apply_exposure_bracket()
 		frame, (image_w, image_h) = self.capture_fn()
 		grey, scale = self.preprocess_fn(frame, int(self.detect_width))
 		dets = self.detector.detect(grey)

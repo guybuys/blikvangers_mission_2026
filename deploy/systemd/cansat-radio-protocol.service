@@ -55,7 +55,9 @@ ExecStartPre=/bin/mkdir -p /home/icw/cansat_logs
 # Pas --freq / --node / --dest / pins aan jullie hardware aan.
 # --freq is enkel fallback: zodra de Pico ``SET FREQ`` heeft gedaan, staat
 # ``config/radio_runtime.json`` op beide kanten in sync.
-ExecStart=/home/icw/cansat_mission_2026/.venv/bin/python scripts/cansat_radio_protocol.py --verbose --poll 1.0 --reply-delay 0.08 --photo-dir /home/icw/photos --log-dir /home/icw/cansat_logs --bme280-addr 0x77 --camera-resolution 1600x1300
+# ``--deploy-save-every-n``: bij default camera-fps 7 is N=7 ≈ 1 JPEG/s;
+# N=2 ≈ 3,5/s (meer SD/CPU). Zie ``scripts/cansat_radio_protocol.py --help``.
+ExecStart=/home/icw/cansat_mission_2026/.venv/bin/python scripts/cansat_radio_protocol.py --verbose --poll 1.0 --reply-delay 0.08 --photo-dir /home/icw/photos --log-dir /home/icw/cansat_logs --bme280-addr 0x77 --camera-resolution 1600x1300 --deploy-save-every-n 2
 Restart=on-failure
 RestartSec=5
 
