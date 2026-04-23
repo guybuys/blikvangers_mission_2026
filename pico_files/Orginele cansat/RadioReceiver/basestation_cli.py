@@ -372,7 +372,7 @@ def _print_help_local():
 	print("  !setstate NAME stuur SET STATE NAME — alleen in CONFIG; voor demo / pre-staging")
 	print("  !iir [N]       zonder N: GET IIR; met N (0/2/4/8/16): SET IIR N — lager = sneller, hoger = stiller")
 	print("  !altprime [N]  zonder N: GET ALT PRIME; met N (1..32): SET ALT PRIME N — meer = accuratere !alt, trager")
-	print("  !listen        alleen ontvangen (ACK aan) tot Ctrl+C — Thonny: stop knop")
+	print("  !listen        alleen ontvangen (ACK aan); Ctrl+C → BS> (Thonny Stop = script uit)")
 	print("  !test [s]      vraag TEST-mode op de CanSat (default 10s, 2..60), luister naar TLM")
 	print("  !servo         open servo-tuning sub-REPL (SERVO START -> letters -> SAVE/STOP)")
 	print("  !servo enable  zet servo-rail aan (geen pulse)")
@@ -660,26 +660,31 @@ def _handle_local(line: str) -> bool:
 		else:
 			print("ERR: !log on [pad] | !log off | !log status")
 	elif cmd == "!listen":
-		print("Listen-only (ACK aan). Stop met Thonny Stop of hardware reset.")
-		while True:
-			pkt = rfm.receive(with_ack=True)
-			if pkt is not None:
-				text, parsed = _decode_packet(pkt)
-				if parsed and parsed.get("kind") == "TLM":
-					print("RX TLM:", text)
-				else:
-					print("RX:", pkt)
-					if text:
-						print("    ASCII:", text)
-				print("    RSSI:", rfm.last_rssi)
-				_update_mode_from_parsed(parsed)
-				_log_emit(
-					"RX",
-					text if text else "",
-					rssi=rfm.last_rssi,
-					parsed=parsed,
-					extra={"listen": True},
-				)
+		print(
+			"Listen-only (ACK aan). Ctrl+C → terug naar BS>; Thonny Stop stopt het hele script."
+		)
+		try:
+			while True:
+				pkt = rfm.receive(with_ack=True)
+				if pkt is not None:
+					text, parsed = _decode_packet(pkt)
+					if parsed and parsed.get("kind") == "TLM":
+						print("RX TLM:", text)
+					else:
+						print("RX:", pkt)
+						if text:
+							print("    ASCII:", text)
+					print("    RSSI:", rfm.last_rssi)
+					_update_mode_from_parsed(parsed)
+					_log_emit(
+						"RX",
+						text if text else "",
+						rssi=rfm.last_rssi,
+						parsed=parsed,
+						extra={"listen": True},
+					)
+		except KeyboardInterrupt:
+			print("\n!listen gestopt (KeyboardInterrupt) — typ verder op BS>.")
 	else:
 		print("Onbekend lokaal commando — typ !help")
 	return True
@@ -715,36 +720,17 @@ def _run_test_mode(seconds):
 
 	Werking:
 	  1. Stuur ``SET MODE TEST <seconds>`` en wacht op antwoord (mag ook ``ERR PRE …`` zijn).
+	     Gebruikt ``_send_and_wait_reply`` (zelfde 3x retry als andere commando's) i.p.v.
+	     één TX — half-duplex/TLM-raster gaf anders vaker stille timeouts.
 	  2. Bij ``OK MODE TEST …`` gaan we ``seconds + 3`` seconden luisteren naar TLM en
 	     het ``EVT MODE CONFIG``-event dat de CanSat na afloop stuurt.
 	  3. Zodra dat event binnenkomt vallen we terug op de prompt. Lokale mode-markering
 	     (``MODE_LAST``) wordt automatisch bijgewerkt via ``_parse_reply``.
 	"""
 	wire = "SET MODE TEST %g" % float(seconds)
-	payload = validate_wire_line(wire).encode("utf-8")
-	if len(payload) > MAX_PAYLOAD:
-		print("ERR payload te lang")
+	reply_text = _send_and_wait_reply(wire)
+	if reply_text is None:
 		return
-	ok = rfm.send(payload, keep_listening=True)
-	if not ok:
-		print("ERR TX timeout (radio)")
-		_log_emit("ERR", wire, extra={"why": "tx-timeout"})
-		return
-	print("TX ->", wire)
-	_log_emit("TX", wire)
-	if REPLY_GAP_S > 0:
-		time.sleep(REPLY_GAP_S)
-	# Zelfde filtering als bij gewone commando's: TLM/EVT mogen het echte
-	# ``OK MODE TEST <s>`` antwoord niet overstemmen.
-	reply_text, parsed = _recv_reply_filtering_telemetry(wire)
-	if reply_text is None and parsed is None:
-		print("(geen antwoord binnen %.1f s)" % REPLY_TIMEOUT_S)
-		_log_emit("TIMEOUT", wire, extra={"timeout_s": REPLY_TIMEOUT_S})
-		return
-	print("RX <-", reply_text if reply_text else "(undecodable)")
-	print("    RSSI:", rfm.last_rssi)
-	_update_mode_from_parsed(parsed)
-	_log_emit("RX", reply_text or "", rssi=rfm.last_rssi, parsed=parsed)
 	if not (reply_text and reply_text.startswith("OK MODE TEST")):
 		print("TEST-mode niet gestart — zie reply.")
 		return
@@ -874,12 +860,15 @@ def _send_and_wait_reply(wire_line: str):
 	venster (`REPLY_TIMEOUT_S / MAX_TX_ATTEMPTS`). Op die manier valt
 	statistisch elke poging in een ander stuk van de TLM-cyclus van de Zero;
 	zonder dat horen wij dezelfde TLM-burst als "antwoord" of helemaal niets.
+
+	Returns:
+		De ontvangen reply-regel (UTF-8), of ``None`` bij timeout/TX-fout/parse-fout.
 	"""
 	payload = validate_wire_line(wire_line).encode("utf-8")
 	if len(payload) > MAX_PAYLOAD:
 		print("ERR payload te lang")
 		_log_emit("ERR", wire_line, extra={"why": "payload-too-long"})
-		return
+		return None
 	# Per-poging venster: deel REPLY_TIMEOUT_S over MAX_TX_ATTEMPTS, maar nooit
 	# minder dan 2.5 s. Sommige commando's (CAL GROUND doet 9 BME280-reads à
 	# ~225 ms bij OS=16 ⇒ ~2.0 s, plus reply-delay + radio-TX) hebben echt 2 s
@@ -891,7 +880,7 @@ def _send_and_wait_reply(wire_line: str):
 		if not ok:
 			print("ERR TX timeout (radio)")
 			_log_emit("ERR", wire_line, extra={"why": "tx-timeout", "attempt": attempt})
-			return
+			return None
 		if attempt == 0:
 			print("TX ->", wire_line)
 			_log_emit("TX", wire_line)
@@ -914,7 +903,7 @@ def _send_and_wait_reply(wire_line: str):
 			_log_emit("RX", reply_text or "", rssi=rfm.last_rssi, parsed=parsed)
 			if reply_text:
 				_post_process_reply(wire_line, reply_text)
-			return
+			return reply_text
 	# Alle pogingen op — meld dat consistent.
 	print(
 		"(geen antwoord binnen %.1f s, %d pogingen)"
@@ -926,6 +915,7 @@ def _send_and_wait_reply(wire_line: str):
 		wire_line,
 		extra={"timeout_s": REPLY_TIMEOUT_S, "attempts": MAX_TX_ATTEMPTS},
 	)
+	return None
 
 
 def main():

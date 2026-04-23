@@ -112,6 +112,7 @@ Oude korte vormen blijven werken: `SET TRIGGER ASCENT <m>`, `DEPLOY`, `LAND` (al
 ## 7 — Missie starten
 
 - [ ] **`SET MODE MISSION`** (geen `!`; antwoord `OK MODE MISSION`) — Zero begint in **`PAD_IDLE`**, apogee wordt gereset.
+- [ ] **`!listen`** — de Pico-CLI blokkeert anders op `input()` en **ontvangt geen TLM/EVT** tussen commando’s. Na MISSION-start: **`!listen`** voor continu luisteren (liefst met **`!log on`** al actief). **Ctrl+C** stopt alleen listen en geeft **`BS>`** terug (geen script-herstart nodig); **Thonny Stop** stopt het hele base-station-script.
 - [ ] In **`PAD_IDLE`**: lage autonomie-telemetrie (o.a. **~5 s beacon**-interval in de huidige code — geen continue 1 Hz); radio kan zwak ogenblikken — dat is by design t.o.v. batterij.
 - [ ] **Niet** rekenen op tussentijdse `SET STATE` in MISSION: autonome overgangen alleen (tenzij jullie firmware dat expliciet toevoegt).
 
@@ -142,6 +143,7 @@ Zie **`!state`** of `GET STATE` als je twijfelt.
 | `!triggers` | `GET TRIGGERS` |
 | `!state` / `!alt` / `!apogee` | Status / hoogte / apogee |
 | `!log on` / `!log off` | JSONL-sessie |
+| `!listen` | Continu RX (TLM/EVT); na `SET MODE MISSION` essentieel; Ctrl+C → `BS>` |
 | `!test [s]` | Dry-run `DEPLOYED` |
 | `!gimbal on` / `off` / `status` | Gimbal in MISSION/TEST + status |
 
