@@ -217,14 +217,15 @@ def _plot_file(csv_path: Path, out: Optional[Path], show: bool) -> Optional[Path
 			color="#888888", fontsize=9,
 		)
 	ax.grid(True, linestyle=":", alpha=0.4)
-	ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
-	ax.set_xlabel("UTC")
 
 	# State-markers bovenop alle panels: de verticale lijnen tekenen we pas
 	# nu alle ylimits stabiel zijn, anders zouden de labels hun posities
 	# herbereken bij elke nieuwe plot.
 	for ax in axes:
 		_add_state_markers(ax, transitions)
+		ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+		ax.set_xlabel("UTC")
+		ax.tick_params(axis="x", which="both", labelbottom=True)
 
 	if out is None:
 		out = csv_path.with_suffix(".png")

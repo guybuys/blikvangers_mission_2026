@@ -346,7 +346,7 @@ rfm.node = NODE_LOCAL
 rfm.destination = DEST_CANSAT
 rfm.ack_retries = 2
 rfm.ack_wait = 0.4
-
+rfm.tx_power = 20  # dBm (RFM69HCW), gelijk houden met --tx-power op de Zero
 
 def _print_help_local():
 	print()

@@ -55,7 +55,7 @@ MAX_PAYLOAD = 60
 
 # Standaard RadioHead-node nummers (afstemmen met CanSat / emitter)
 DEFAULT_BASE_NODE = 100
-DEFAULT_CANSAT_NODE = 120
+DEFAULT_CANSAT_NODE = 123
 
 
 def validate_wire_line(line: str) -> str:

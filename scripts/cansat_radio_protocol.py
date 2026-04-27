@@ -109,7 +109,7 @@ def _save_persisted_freq(path: Path, mhz: float) -> Optional[str]:
 def main() -> int:
 	p = argparse.ArgumentParser(
 		description="CanSat (Zero 2 W) RFM69 wire-protocol loop. "
-		"Defaults kunnen via .env (CANSAT_RADIO_KEY/NODE/DEST/FREQ_MHZ) overschreven worden; "
+		"Defaults kunnen via .env (CANSAT_RADIO_KEY/NODE/DEST/FREQ_MHZ/TX_POWER) overschreven worden; "
 		"CLI-args winnen altijd.",
 	)
 	p.add_argument(
@@ -121,8 +121,8 @@ def main() -> int:
 	p.add_argument(
 		"--node",
 		type=int,
-		default=int(os.environ.get("CANSAT_RADIO_NODE", "120")),
-		help="Dit toestel (CanSat) RadioHead-adres (default: $CANSAT_RADIO_NODE of 120)",
+		default=int(os.environ.get("CANSAT_RADIO_NODE", "123")),
+		help="Dit toestel (CanSat) RadioHead-adres (default: $CANSAT_RADIO_NODE of 123)",
 	)
 	p.add_argument(
 		"--dest",
@@ -147,7 +147,12 @@ def main() -> int:
 	)
 	p.add_argument("--spi-bus", type=int, default=0)
 	p.add_argument("--spi-device", type=int, default=0)
-	p.add_argument("--tx-power", type=int, default=13)
+	p.add_argument(
+		"--tx-power",
+		type=int,
+		default=int(os.environ.get("CANSAT_RADIO_TX_POWER", "20")),
+		help="RFM69 TX-vermogen dBm (HCW tot 20; default: $CANSAT_RADIO_TX_POWER of 20)",
+	)
 	p.add_argument("--poll", type=float, default=1.0, help="receive()-timeout in seconden")
 	p.add_argument(
 		"--reply-delay",
